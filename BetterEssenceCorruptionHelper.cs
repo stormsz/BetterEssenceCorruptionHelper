@@ -20,13 +20,9 @@ public class BetterEssenceCorruptionHelper : BaseSettingsPlugin<Settings>
 
     private bool AnyDebugEnabled => Settings.ShowDebugInfo.Value;
 
-    // Global tracking - use position as persistent identifier for the entire map session
+
     private readonly HashSet<string> discoveredEssences = [];
-
-    // All essences in this map that should be corrupted
     private readonly HashSet<string> shouldCorruptEssences = [];
-
-    // Essences that were successfully corrupted
     private readonly HashSet<string> successfullyCorrupted = [];
 
     // Essences that should have been corrupted but were killed without corrupting
@@ -177,6 +173,7 @@ public class BetterEssenceCorruptionHelper : BaseSettingsPlugin<Settings>
     private static string GetPositionKey(Entity entity)
     {
         // Use rounded position as persistent identifier
+        // TODO: Not sure if theres a better way to do this.
         var pos = entity.PosNum;
         return $"{(int)pos.X}_{(int)pos.Y}_{(int)pos.Z}";
     }
@@ -196,14 +193,15 @@ public class BetterEssenceCorruptionHelper : BaseSettingsPlugin<Settings>
         var positionKey = GetPositionKey(entity);
         data.LastKnownPosition = entity.PosNum;
 
-        // Track all discovered essences in this map session
+        // Track all discovered essences in this map
         discoveredEssences.Add(positionKey);
 
-        // Track essences that should be corrupted (for the entire map session)
+        // Track essences that should be corrupted (for the entire map)
         if (data.State == EssenceState.ShouldCorrupt)
         {
             shouldCorruptEssences.Add(positionKey);
-            // Remove from missed if it's now should corrupt (in case it was incorrectly marked)
+
+            // Remove from missed if it's now should corrupt
             missedCorruptions.Remove(positionKey);
         }
     }
@@ -288,7 +286,6 @@ public class BetterEssenceCorruptionHelper : BaseSettingsPlugin<Settings>
     {
         if (!Settings.Enable || ingameState == null) return;
 
-        // Draw the separate map stats window
         if (AnyDebugEnabled)
         {
             DrawMapStatsWindow();
@@ -314,10 +311,10 @@ public class BetterEssenceCorruptionHelper : BaseSettingsPlugin<Settings>
 
     private void DrawMapStatsWindow()
     {
-        // Count current corrupted essences (live tracking)
+        // Count current corrupted essences
         var currentCorruptedCount = trackedEntities.Values.Count(data => data.Analysis.IsValid && data.Analysis.IsCorrupted);
 
-        // Count current should-corrupt essences (live tracking)
+        // Count current should-corrupt essences
         var currentShouldCorruptCount = trackedEntities.Values.Count(data => data.State == EssenceState.ShouldCorrupt);
 
         var statsLines = new List<(string text, Color color)>
@@ -349,7 +346,7 @@ public class BetterEssenceCorruptionHelper : BaseSettingsPlugin<Settings>
             }
         }
 
-        // Position the stats window in a fixed location (top-right corner)
+        // Position the stats window
         var windowRect = GameController.Window.GetWindowRectangle();
         var statsRect = new RectangleF(
             windowRect.Width - maxWidth - 30,
@@ -428,7 +425,6 @@ public class BetterEssenceCorruptionHelper : BaseSettingsPlugin<Settings>
         float thickness = Settings.BorderThickness.Value;
         float margin = Settings.BorderMargin.Value;
 
-        // Ensure minimum size for visibility
         var borderRect = new RectangleF(
             rect.X - thickness / 2f + margin,
             rect.Y - thickness / 2f,

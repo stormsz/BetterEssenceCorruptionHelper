@@ -61,7 +61,7 @@ internal static class EssenceLabelAnalyzer
             return;
         }
 
-        // Check for MEDS essences (always corrupt these)
+        // Check for MEDS essences
         if (MedsEssences.Any(meds => text.Contains(meds)))
         {
             result.HasMeds = true;
@@ -73,7 +73,7 @@ internal static class EssenceLabelAnalyzer
             result.HasValuableResult = true;
         }
 
-        // Count essence tiers (all 6 tiers)
+        // Count essence tiers
         if (text.Contains("Deafening"))
         {
             result.DeafeningCount++;
@@ -107,6 +107,7 @@ internal static class EssenceLabelAnalyzer
         else if (text.Contains("Essence of") || IsKnownEssenceName(text))
         {
             // Count any essence we might have missed
+            // If we reach here, we have some problem
             result.EssenceCount++;
         }
     }
@@ -127,7 +128,7 @@ internal static class EssenceLabelAnalyzer
             return;
         }
 
-        // RULE 3: Enhanced Einhar's Memory pattern - more flexible thresholds
+        // RULE 3: TODO: Enhanced Einhar's Memory pattern
         if ((result.ScreamingCount >= 1 && result.ShriekingCount >= 2) ||
             (result.ScreamingCount >= 2 && result.ShriekingCount >= 1))
         {
