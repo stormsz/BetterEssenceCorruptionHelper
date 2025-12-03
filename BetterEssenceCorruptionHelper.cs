@@ -319,21 +319,17 @@ public class BetterEssenceCorruptionHelper : BaseSettingsPlugin<Settings>
 
         var statsLines = new List<(string text, Color color)>
         {
-            ("MAP SESSION STATS", Color.Yellow),
-            ("─".PadRight(25, '─'), Color.Gray),
             ($"Total Found: {discoveredEssences.Count}", Color.White),
             ($"Should Corrupt: {shouldCorruptEssences.Count}", Color.Red),
             ("", Color.White),
             ("CURRENT STATE", Color.Yellow),
+            ($"Active Entities: {trackedEntities.Count}", Color.White),
             ($"Live Should Corrupt: {currentShouldCorruptCount}", Color.Red),
             ($"Live Corrupted: {currentCorruptedCount}", Color.LightGreen),
             ("", Color.White),
-            ("SESSION RESULTS", Color.Yellow),
             ($"Successfully Corrupted: {successfullyCorrupted.Count}", Color.LightGreen),
             ($"Missed Corruptions: {missedCorruptions.Count}", Color.Orange),
-            ("", Color.White),
-            ("LIVE TRACKING", Color.Yellow),
-            ($"Active Entities: {trackedEntities.Count}", Color.White)
+            ("", Color.White)
         };
 
         float maxWidth = 0;
