@@ -9,7 +9,7 @@ on:
 
 env:
   PLUGIN_NAME: BetterEssenceCorruptionHelper
-  
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -24,12 +24,12 @@ jobs:
         dotnet-version: 8.0.x
 
     - name: Build Release DLL
-      run: dotnet build $PLUGIN_NAME/$PLUGIN_NAME.csproj --configuration Release
+      run: dotnet build $PLUGIN_NAME.csproj --configuration Release
 
     - name: Create plugin folder structure
       run: |
         mkdir -p release/$PLUGIN_NAME
-        cp $PLUGIN_NAME/bin/Release/net8.0-windows/$PLUGIN_NAME.dll release/$PLUGIN_NAME/
+        cp bin/Release/net8.0-windows/$PLUGIN_NAME.dll release/$PLUGIN_NAME/
 
     - name: Zip plugin
       run: |
