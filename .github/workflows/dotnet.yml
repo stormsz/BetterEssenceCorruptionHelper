@@ -9,6 +9,9 @@ on:
 
 env:
   PLUGIN_NAME: BetterEssenceCorruptionHelper
+
+permissions:
+  contents: write
   
 jobs:
   build:
@@ -45,6 +48,6 @@ jobs:
       with:
         tag_name: ${{ github.ref_name }}
         files: release/${{ env.PLUGIN_NAME }}.zip
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        token: ${{ secrets.GITHUB_TOKEN }}
+        overwrite: true
 
