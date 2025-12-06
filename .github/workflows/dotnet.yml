@@ -49,3 +49,5 @@ jobs:
         tag_name: ${{ github.ref_name }}
         files: release/${{ env.PLUGIN_NAME }}.zip
         token: ${{ secrets.GITHUB_TOKEN }}
+        body: |
+          **This plugin is completely free! There are no payments required or accepted for using this plugin. If you "purchased" it, you have been scammed.**
