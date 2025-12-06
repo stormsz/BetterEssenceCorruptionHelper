@@ -2,6 +2,7 @@
 using ExileCore.Shared.Interfaces;
 using ExileCore.Shared.Nodes;
 using SharpDX;
+using System.Collections.Generic;
 
 namespace BetterEssenceCorruptionHelper
 {
@@ -10,49 +11,42 @@ namespace BetterEssenceCorruptionHelper
         public Settings()
         {
             Enable = new ToggleNode(true);
-            Visual = new VisualSettings();
-            CorruptMe = new CorruptMeSettings();
-            KillReady = new KillReadySettings();
-            SessionStats = new SessionStatsSettings();
+            Indicators = new IndicatorSettings();
+            MapStats = new MapStatsSettings();
             Debug = new DebugSettings();
         }
 
         [Menu("Enable", "Turns the entire plugin on/off")]
         public ToggleNode Enable { get; set; }
 
-        [Menu("Visual Settings", 100, CollapsedByDefault = false)]
-        public VisualSettings Visual { get; set; }
+        [Menu("Essence Indicators", 50, CollapsedByDefault = false)]
+        public IndicatorSettings Indicators { get; set; }
 
-        [Menu("Corrupt-Me Settings", 200, CollapsedByDefault = false)]
-        public CorruptMeSettings CorruptMe { get; set; }
+        [Menu("Essence Map Stats", 100, CollapsedByDefault = false)]
+        public MapStatsSettings MapStats { get; set; }
 
-        [Menu("Kill-Ready Settings", 300, CollapsedByDefault = false)]
-        public KillReadySettings KillReady { get; set; }
-
-        [Menu("Session Stats Settings", 350, CollapsedByDefault = false)]
-        public SessionStatsSettings SessionStats { get; set; }
-
-        [Menu("Debug Settings", 400, CollapsedByDefault = true)]
+        [Menu("Debug Settings", 200, CollapsedByDefault = true)]
         public DebugSettings Debug { get; set; }
     }
 
-    [Submenu]
-    public class VisualSettings
+
+    [Submenu(CollapsedByDefault = false)]
+    public class IndicatorSettings
     {
-        [Menu("Border Thickness", "How thick the colored border should be (1-10)")]
-        public RangeNode<float> BorderThickness { get; set; } = new RangeNode<float>(3f, 1f, 10f);
+        [Menu("Enable All Indicators", "Master toggle for all essence indicators")]
+        public ToggleNode EnableAllIndicators { get; set; } = new ToggleNode(true);
 
-        [Menu("Border Margin", "Extra padding around border")]
-        public RangeNode<float> BorderMargin { get; set; } = new RangeNode<float>(45f, 40f, 50f);
+        [Menu("Corrupt-Me Indicator", 100)]
+        public CorruptMeSettings CorruptMe { get; set; } = new CorruptMeSettings();
 
-        [Menu("Text Size", "Scale of the 'CORRUPT/KILL' text")]
-        public RangeNode<float> TextSize { get; set; } = new RangeNode<float>(2f, 0.5f, 5f);
+        [Menu("Kill-Ready Indicator", 200)]
+        public KillReadySettings KillReady { get; set; } = new KillReadySettings();
     }
 
     [Submenu]
     public class CorruptMeSettings
     {
-        [Menu("Show Corrupt-Me", "Display indicator for essences that should be corrupted")]
+        [Menu("Enable Corrupt-Me Indicator", "Display indicator for essences that should be corrupted")]
         public ToggleNode ShowCorruptMe { get; set; } = new ToggleNode(true);
 
         [Menu("Draw Border", "Draw border around corrupt-me essences")]
@@ -60,6 +54,15 @@ namespace BetterEssenceCorruptionHelper
 
         [Menu("Draw Text", "Show 'CORRUPT' text above corrupt-me essences")]
         public ToggleNode DrawText { get; set; } = new ToggleNode(true);
+
+        [Menu("Border Thickness", "How thick the border should be")]
+        public RangeNode<float> BorderThickness { get; set; } = new RangeNode<float>(3f, 1f, 10f);
+
+        [Menu("Border Margin", "Extra padding around border")]
+        public RangeNode<float> BorderMargin { get; set; } = new RangeNode<float>(45f, 40f, 50f);
+
+        [Menu("Text Size", "Scale of the 'CORRUPT' text")]
+        public RangeNode<float> TextSize { get; set; } = new RangeNode<float>(2f, 0.5f, 5f);
 
         [Menu("Border Color", "Border color for corrupt-me indicator")]
         public ColorNode BorderColor { get; set; } = new ColorNode(Color.Red);
@@ -71,7 +74,7 @@ namespace BetterEssenceCorruptionHelper
     [Submenu]
     public class KillReadySettings
     {
-        [Menu("Show Kill-Ready", "Display indicator for essences ready to kill")]
+        [Menu("Enable Kill-Ready Indicator", "Display indicator for essences ready to kill")]
         public ToggleNode ShowKillReady { get; set; } = new ToggleNode(true);
 
         [Menu("Draw Border", "Draw border around kill-ready essences")]
@@ -80,6 +83,15 @@ namespace BetterEssenceCorruptionHelper
         [Menu("Draw Text", "Show 'KILL' text above kill-ready essences")]
         public ToggleNode DrawText { get; set; } = new ToggleNode(true);
 
+        [Menu("Border Thickness", "How thick the border should be")]
+        public RangeNode<float> BorderThickness { get; set; } = new RangeNode<float>(3f, 1f, 10f);
+
+        [Menu("Border Margin", "Extra padding around border")]
+        public RangeNode<float> BorderMargin { get; set; } = new RangeNode<float>(45f, 40f, 50f);
+
+        [Menu("Text Size", "Scale of the 'KILL' text")]
+        public RangeNode<float> TextSize { get; set; } = new RangeNode<float>(2f, 0.5f, 5f);
+
         [Menu("Border Color", "Border color for kill-ready indicator")]
         public ColorNode BorderColor { get; set; } = new ColorNode(Color.Green);
 
@@ -87,35 +99,40 @@ namespace BetterEssenceCorruptionHelper
         public ColorNode TextColor { get; set; } = new ColorNode(Color.Green);
     }
 
-    [Submenu]
-    public class SessionStatsSettings
+    [Submenu(CollapsedByDefault = false)]
+    public class MapStatsSettings
     {
-        [Menu("Show Session Stats", "Display session stats window")]
-        public ToggleNode ShowSessionStats { get; set; } = new ToggleNode(true);
+        [Menu("Show Map Stats Window", "Display essence map statistics window")]
+        public ToggleNode ShowMapStats { get; set; } = new ToggleNode(true);
 
-        [Menu("Session Window X", "Horizontal position of session stats window")]
-        public RangeNode<int> SessionWindowX { get; set; } = new RangeNode<int>(10, 0, 5000);
+        [Menu("Show in Town/Hideout", "Display stats window even in town or hideout")]
+        public ToggleNode ShowInTownHideout { get; set; } = new ToggleNode(false);
+        [Menu("Window Anchor", "Which side of the screen to anchor the window to")]
+        public ListNode WindowAnchor { get; set; } = new ListNode { Value = "Top Right", Values = ["Top Left", "Top Right"] };
 
-        [Menu("Session Window Y", "Vertical position of session stats window")]
-        public RangeNode<int> SessionWindowY { get; set; } = new RangeNode<int>(100, 0, 5000);
+        [Menu("Offset from Edge X", "Horizontal offset from anchor point")]
+        public RangeNode<int> OffsetX { get; set; } = new RangeNode<int>(30, 0, 500);
 
-        [Menu("Title Background", "Background color for session stats title")]
+        [Menu("Offset from Edge Y", "Vertical offset from anchor point")]
+        public RangeNode<int> OffsetY { get; set; } = new RangeNode<int>(680, 0, 1000);
+
+        [Menu("Title Background", "Background color for window title")]
         public ColorNode TitleBackground { get; set; } = new ColorNode(new Color(0, 157, 255, 200));
 
-        [Menu("Content Background", "Background color for session stats content")]
+        [Menu("Content Background", "Background color for window content")]
         public ColorNode ContentBackground { get; set; } = new ColorNode(new Color(0, 0, 0, 150));
 
-        [Menu("Title Color", "Text color for session stats title")]
+        [Menu("Title Color", "Text color for window title")]
         public ColorNode TitleColor { get; set; } = new ColorNode(Color.White);
 
-        [Menu("Text Color", "Text color for session stats content")]
+        [Menu("Text Color", "Text color for window content")]
         public ColorNode TextColor { get; set; } = new ColorNode(Color.White);
 
-        [Menu("Border Color", "Border color for session stats window")]
+        [Menu("Border Color", "Border color for window")]
         public ColorNode BorderColor { get; set; } = new ColorNode(new Color(100, 100, 100, 200));
     }
 
-    [Submenu]
+    [Submenu(CollapsedByDefault = true)]
     public class DebugSettings
     {
         [Menu("Show Debug Info", "Display debug information overlay for each essence")]

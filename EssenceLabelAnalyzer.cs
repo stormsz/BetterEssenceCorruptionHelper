@@ -54,26 +54,22 @@ internal static class EssenceLabelAnalyzer
 
     private static void AnalyzeTextLine(string text, ref EssenceAnalysis result)
     {
-        // Check for corruption
-        if (text.Contains("Corrupted") || text.Contains("Vaal Orb"))
+        if (text.Contains("Corrupted"))
         {
             result.IsCorrupted = true;
             return;
         }
 
-        // Check for MEDS essences
         if (MedsEssences.Any(meds => text.Contains(meds)))
         {
             result.HasMeds = true;
         }
 
-        // Check for valuable essences that result from corruption
         if (ValuableEssences.Any(valuable => text.Contains(valuable)))
         {
             result.HasValuableResult = true;
         }
 
-        // Count essence tiers
         if (text.Contains("Deafening"))
         {
             result.DeafeningCount++;
@@ -128,29 +124,6 @@ internal static class EssenceLabelAnalyzer
             return;
         }
 
-        // RULE 3: TODO: Enhanced Einhar's Memory pattern
-        if ((result.ScreamingCount >= 1 && result.ShriekingCount >= 2) ||
-            (result.ScreamingCount >= 2 && result.ShriekingCount >= 1))
-        {
-            result.HasValuablePattern = true;
-            return;
-        }
-
-        // RULE 4: High-tier concentration (2+ Deafening or 3+ Shrieking)
-        if (result.DeafeningCount >= 2 || result.ShriekingCount >= 3)
-        {
-            result.HasValuablePattern = true;
-            return;
-        }
-
-        // RULE 5: Mixed high-tier combination
-        if (result.DeafeningCount >= 1 && result.ShriekingCount >= 2)
-        {
-            result.HasValuablePattern = true;
-            return;
-        }
-
-        // RULE 6: Already has valuable corruption results
         if (result.HasValuableResult)
         {
             result.HasValuablePattern = true;
