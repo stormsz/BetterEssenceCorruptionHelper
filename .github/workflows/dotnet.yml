@@ -1,6 +1,6 @@
 # This workflow will build a .NET project
 # For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-net
-name: .NET
+name: Build & Release Plugin
 
 on:
   push:
@@ -12,26 +12,35 @@ env:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
     - name: Checkout repo
       uses: actions/checkout@v4
-    
+
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: 8.0.x
-        
+
+    - name: Clone deps
+      run: git clone --depth=1 https://github.com/exApiTools/ExileApi-Compiled.git deps
+
+    - name: Prepare libs folder with DLLs
+      run: |
+        mkdir libs
+        cp deps/ExileCore.dll deps/GameOffsets.dll libs/
+
     - name: Build Release DLL
       run: dotnet build ${{ env.PLUGIN_NAME }}.csproj --configuration Release
+      env:
+        CI_LIBS_PATH: libs
 
     - name: Create plugin folder structure
       run: |
         mkdir -p release/${{ env.PLUGIN_NAME }}
         cp ${{ env.PLUGIN_NAME }}/bin/Release/net8.0-windows/${{ env.PLUGIN_NAME }}.dll release/${{ env.PLUGIN_NAME }}/
-        
+
     - name: Zip plugin folder
       run: |
         cd release
