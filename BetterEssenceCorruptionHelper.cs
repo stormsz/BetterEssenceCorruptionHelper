@@ -18,15 +18,14 @@ public class BetterEssenceCorruptionHelper : BaseSettingsPlugin<Settings>
     private readonly Dictionary<long, EssenceEntityData> trackedEntities = [];
     private int entityIdCounter = 0;
 
-    private bool AnyDebugEnabled => Settings.ShowDebugInfo.Value;
-
+    private bool AnyDebugEnabled => Settings.Debug.ShowDebugInfo.Value;
 
     private readonly HashSet<string> discoveredEssences = [];
     private readonly HashSet<string> shouldCorruptEssences = [];
     private readonly HashSet<string> successfullyCorrupted = [];
 
     // Essences that should have been corrupted but were killed without corrupting
-    private readonly HashSet<string> missedCorruptions = []; 
+    private readonly HashSet<string> missedCorruptions = [];
 
     public override bool Initialise()
     {
@@ -173,7 +172,6 @@ public class BetterEssenceCorruptionHelper : BaseSettingsPlugin<Settings>
     private static string GetPositionKey(Entity entity)
     {
         // Use rounded position as persistent identifier
-        // TODO: Not sure if theres a better way to do this.
         var pos = entity.PosNum;
         return $"{(int)pos.X}_{(int)pos.Y}_{(int)pos.Z}";
     }
@@ -293,11 +291,11 @@ public class BetterEssenceCorruptionHelper : BaseSettingsPlugin<Settings>
 
         foreach (var data in trackedEntities.Values)
         {
-            if (data.State == EssenceState.ShouldCorrupt && Settings.ShowCorruptMe.Value)
+            if (data.State == EssenceState.ShouldCorrupt && Settings.CorruptMe.ShowCorruptMe.Value)
             {
                 DrawEntityVisuals(data, isCorruptTarget: true);
             }
-            else if (data.State == EssenceState.ShouldKill && Settings.ShowKillReady.Value)
+            else if (data.State == EssenceState.ShouldKill && Settings.KillReady.ShowKillReady.Value)
             {
                 DrawEntityVisuals(data, isCorruptTarget: false);
             }
@@ -351,12 +349,12 @@ public class BetterEssenceCorruptionHelper : BaseSettingsPlugin<Settings>
             10 + (statsLines.Count * 16)
         );
 
-        if (Settings.DebugBackgroundEnabled.Value)
+        if (Settings.Debug.DebugBackgroundEnabled.Value)
         {
-            var bgColor = Settings.DebugBackgroundColor.Value;
-            bgColor.A = (byte)(Settings.DebugBackgroundOpacity.Value * 255);
+            var bgColor = Settings.Debug.DebugBackgroundColor.Value;
+            bgColor.A = (byte)(Settings.Debug.DebugBackgroundOpacity.Value * 255);
             Graphics.DrawBox(statsRect, bgColor);
-            Graphics.DrawFrame(statsRect, Settings.DebugBorderColor.Value, 1);
+            Graphics.DrawFrame(statsRect, Settings.Debug.DebugBorderColor.Value, 1);
         }
 
         for (int i = 0; i < statsLines.Count; i++)
@@ -397,12 +395,12 @@ public class BetterEssenceCorruptionHelper : BaseSettingsPlugin<Settings>
             10 + (debugLines.Count * 16)
         );
 
-        if (Settings.DebugBackgroundEnabled.Value)
+        if (Settings.Debug.DebugBackgroundEnabled.Value)
         {
-            var bgColor = Settings.DebugBackgroundColor.Value;
-            bgColor.A = (byte)(Settings.DebugBackgroundOpacity.Value * 255);
+            var bgColor = Settings.Debug.DebugBackgroundColor.Value;
+            bgColor.A = (byte)(Settings.Debug.DebugBackgroundOpacity.Value * 255);
             Graphics.DrawBox(debugRect, bgColor);
-            Graphics.DrawFrame(debugRect, Settings.DebugBorderColor.Value, 1);
+            Graphics.DrawFrame(debugRect, Settings.Debug.DebugBorderColor.Value, 1);
         }
 
         for (int i = 0; i < debugLines.Count; i++)
@@ -418,8 +416,8 @@ public class BetterEssenceCorruptionHelper : BaseSettingsPlugin<Settings>
 
     private RectangleF GetBorderRect(RectangleF rect)
     {
-        float thickness = Settings.BorderThickness.Value;
-        float margin = Settings.BorderMargin.Value;
+        float thickness = Settings.Visual.BorderThickness.Value;
+        float margin = Settings.Visual.BorderMargin.Value;
 
         var borderRect = new RectangleF(
             rect.X - thickness / 2f + margin,
@@ -431,7 +429,7 @@ public class BetterEssenceCorruptionHelper : BaseSettingsPlugin<Settings>
         return borderRect;
     }
 
-    private List<(string text, Color color)> BuildDebugContent(EssenceEntityData data)
+    private static List<(string text, Color color)> BuildDebugContent(EssenceEntityData data)
     {
         var lines = new List<(string, Color)>();
 
@@ -485,21 +483,21 @@ public class BetterEssenceCorruptionHelper : BaseSettingsPlugin<Settings>
 
         var rect = data.Label.Label.GetClientRectCache;
 
-        if (Settings.DrawBorder.Value)
+        if (Settings.Visual.DrawBorder.Value)
         {
             var color = isCorruptTarget
-                ? Settings.CorruptMeBorderColor.Value
-                : Settings.KillReadyBorderColor.Value;
+                ? Settings.CorruptMe.BorderColor.Value
+                : Settings.KillReady.BorderColor.Value;
 
             DrawBorder(rect, color);
         }
 
-        if (Settings.DrawText.Value)
+        if (Settings.Visual.DrawText.Value)
         {
             var text = isCorruptTarget ? "CORRUPT" : "KILL";
             var textColor = isCorruptTarget
-                ? Settings.CorruptMeTextColor.Value
-                : Settings.KillReadyTextColor.Value;
+                ? Settings.CorruptMe.TextColor.Value
+                : Settings.KillReady.TextColor.Value;
 
             DrawText(rect, text, textColor);
         }
@@ -508,18 +506,18 @@ public class BetterEssenceCorruptionHelper : BaseSettingsPlugin<Settings>
     private void DrawBorder(RectangleF rect, Color color)
     {
         var borderRect = GetBorderRect(rect);
-        Graphics.DrawFrame(borderRect, color, (int)Settings.BorderThickness.Value);
+        Graphics.DrawFrame(borderRect, color, (int)Settings.Visual.BorderThickness.Value);
     }
 
     private void DrawText(RectangleF rect, string text, Color color)
     {
         try
         {
-            using (Graphics.SetTextScale(Settings.TextSize.Value))
+            using (Graphics.SetTextScale(Settings.Visual.TextSize.Value))
             {
                 var textPos = new Vector2(
                     rect.X + rect.Width / 2,
-                    rect.Y - Settings.TextSize.Value * 25 + 15
+                    rect.Y - Settings.Visual.TextSize.Value * 25 + 15
                 );
 
                 var textSize = Graphics.MeasureText(text);

@@ -10,98 +10,92 @@ namespace BetterEssenceCorruptionHelper
         public Settings()
         {
             Enable = new ToggleNode(true);
-
-            VisualSettingsHeader = new EmptyNode();
-            CorruptMeHeader = new EmptyNode();
-            KillReadyHeader = new EmptyNode();
-            DebugHeader = new EmptyNode();
-
-            DrawBorder = new ToggleNode(true);
-            DrawText = new ToggleNode(true);
-            BorderThickness = new RangeNode<float>(3f, 1f, 10f);
-            TextSize = new RangeNode<float>(2f, 0.5f, 5f);
-            BorderMargin = new RangeNode<float>(45f, 40f, 50f);
-
-            ShowCorruptMe = new ToggleNode(true);
-            CorruptMeBorderColor = new ColorNode(Color.Red);
-            CorruptMeTextColor = new ColorNode(Color.Red);
-
-            ShowKillReady = new ToggleNode(true);
-            KillReadyBorderColor = new ColorNode(Color.Green);
-            KillReadyTextColor = new ColorNode(Color.Green);
-
-            ShowDebugInfo = new ToggleNode(false);
-            DebugBackgroundEnabled = new ToggleNode(true);
-            DebugBackgroundColor = new ColorNode(new Color(0, 0, 0, 180));
-            DebugBackgroundOpacity = new RangeNode<float>(0.7f, 0f, 1f);
-            DebugBorderColor = new ColorNode(Color.Gray);
-            DebugWindowWidth = new RangeNode<int>(220, 150, 300);
+            Visual = new VisualSettings();
+            CorruptMe = new CorruptMeSettings();
+            KillReady = new KillReadySettings();
+            Debug = new DebugSettings();
         }
 
-        [Menu("Enable")]
+        [Menu("Enable", "Turns the entire plugin on/off")]
         public ToggleNode Enable { get; set; }
 
-        [Menu("Visual Settings", 200, CollapsedByDefault = false)]
-        public EmptyNode VisualSettingsHeader { get; set; }
+        [Menu("Visual Settings", 100, CollapsedByDefault = false)]
+        public VisualSettings Visual { get; set; }
 
-        [Menu("Draw Border", parentIndex = 200)]
-        public ToggleNode DrawBorder { get; set; }
+        [Menu("Corrupt-Me Settings", 200, CollapsedByDefault = false)]
+        public CorruptMeSettings CorruptMe { get; set; }
 
-        [Menu("Draw Text", parentIndex = 200)]
-        public ToggleNode DrawText { get; set; }
+        [Menu("Kill-Ready Settings", 300, CollapsedByDefault = false)]
+        public KillReadySettings KillReady { get; set; }
 
-        [Menu("Border Thickness", parentIndex = 200)]
-        public RangeNode<float> BorderThickness { get; set; }
+        [Menu("Debug Settings", 400, CollapsedByDefault = true)]
+        public DebugSettings Debug { get; set; }
+    }
 
-        [Menu("Border Margin", parentIndex = 200)]
-        public RangeNode<float> BorderMargin { get; set; }
+    [Submenu]
+    public class VisualSettings
+    {
+        [Menu("Draw Border", "Draw colored border around essence labels")]
+        public ToggleNode DrawBorder { get; set; } = new ToggleNode(true);
 
-        [Menu("Text Size", parentIndex = 200)]
-        public RangeNode<float> TextSize { get; set; }
+        [Menu("Draw Text", "Show 'CORRUPT' or 'KILL' text above essences")]
+        public ToggleNode DrawText { get; set; } = new ToggleNode(true);
 
-        [Menu("Corrupt-Me Display", 300, CollapsedByDefault = false)]
-        public EmptyNode CorruptMeHeader { get; set; }
+        [Menu("Border Thickness", "How thick the colored border should be (1-10)")]
+        public RangeNode<float> BorderThickness { get; set; } = new RangeNode<float>(3f, 1f, 10f);
 
-        [Menu("Show Corrupt-Me", parentIndex = 300)]
-        public ToggleNode ShowCorruptMe { get; set; }
+        [Menu("Text Size", "Scale of the 'CORRUPT/KILL' text")]
+        public RangeNode<float> TextSize { get; set; } = new RangeNode<float>(2f, 0.5f, 5f);
 
-        [Menu("Border Color", parentIndex = 300)]
-        public ColorNode CorruptMeBorderColor { get; set; }
+        [Menu("Border Margin", "Extra padding around border")]
+        public RangeNode<float> BorderMargin { get; set; } = new RangeNode<float>(45f, 40f, 50f);
+    }
 
-        [Menu("Text Color", parentIndex = 300)]
-        public ColorNode CorruptMeTextColor { get; set; }
+    [Submenu]
+    public class CorruptMeSettings
+    {
+        [Menu("Show Corrupt-Me", "Display indicator for essences that should be corrupted")]
+        public ToggleNode ShowCorruptMe { get; set; } = new ToggleNode(true);
 
-        [Menu("Kill-Ready Display", 400, CollapsedByDefault = false)]
-        public EmptyNode KillReadyHeader { get; set; }
+        [Menu("Border Color", "Border color for corrupt-me indicator")]
+        public ColorNode BorderColor { get; set; } = new ColorNode(Color.Red);
 
-        [Menu("Show Kill-Ready", parentIndex = 400)]
-        public ToggleNode ShowKillReady { get; set; }
+        [Menu("Text Color", "Text color for corrupt-me indicator")]
+        public ColorNode TextColor { get; set; } = new ColorNode(Color.Red);
+    }
 
-        [Menu("Border Color", parentIndex = 400)]
-        public ColorNode KillReadyBorderColor { get; set; }
+    [Submenu]
+    public class KillReadySettings
+    {
+        [Menu("Show Kill-Ready", "Display indicator for essences ready to kill")]
+        public ToggleNode ShowKillReady { get; set; } = new ToggleNode(true);
 
-        [Menu("Text Color", parentIndex = 400)]
-        public ColorNode KillReadyTextColor { get; set; }
+        [Menu("Border Color", "Border color for kill-ready indicator")]
+        public ColorNode BorderColor { get; set; } = new ColorNode(Color.Green);
 
-        [Menu("Debug", 500, CollapsedByDefault = true)]
-        public EmptyNode DebugHeader { get; set; }
+        [Menu("Text Color", "Text color for kill-ready indicator")]
+        public ColorNode TextColor { get; set; } = new ColorNode(Color.Green);
+    }
 
-        [Menu("Show Debug Info", parentIndex = 500)]
-        public ToggleNode ShowDebugInfo { get; set; }
+    [Submenu]
+    public class DebugSettings
+    {
+        [Menu("Show Debug Info", "Display debug information overlay")]
+        public ToggleNode ShowDebugInfo { get; set; } = new ToggleNode(false);
 
-        [Menu("Debug Background", parentIndex = 500)]
-        public ToggleNode DebugBackgroundEnabled { get; set; }
+        [Menu("Debug Background", "Enable background for debug window")]
+        public ToggleNode DebugBackgroundEnabled { get; set; } = new ToggleNode(true);
 
-        [Menu("Background Color", parentIndex = 500)]
-        public ColorNode DebugBackgroundColor { get; set; }
+        [Menu("Background Color", "Background color for debug window")]
+        public ColorNode DebugBackgroundColor { get; set; } = new ColorNode(new Color(0, 0, 0, 180));
 
-        [Menu("Background Opacity", parentIndex = 500)]
-        public RangeNode<float> DebugBackgroundOpacity { get; set; }
+        [Menu("Background Opacity", "Opacity of debug window background")]
+        public RangeNode<float> DebugBackgroundOpacity { get; set; } = new RangeNode<float>(0.7f, 0f, 1f);
 
-        [Menu("Border Color", parentIndex = 500)]
-        public ColorNode DebugBorderColor { get; set; }
+        [Menu("Border Color", "Border color for debug window")]
+        public ColorNode DebugBorderColor { get; set; } = new ColorNode(Color.Gray);
 
-        [Menu("Debug Window Width", parentIndex = 500)]
-        public RangeNode<int> DebugWindowWidth { get; set; }
+        [Menu("Debug Window Width", "Width of debug window in pixels")]
+        public RangeNode<int> DebugWindowWidth { get; set; } = new RangeNode<int>(220, 150, 300);
     }
 }
