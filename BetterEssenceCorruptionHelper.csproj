@@ -5,17 +5,25 @@
     <Nullable>enable</Nullable>
     <Platforms>AnyCPU;x64</Platforms>
   </PropertyGroup>
+  
   <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
     <OutputPath>bin\debug\</OutputPath>
   </PropertyGroup>
+  
+  <PropertyGroup>
+    <DepsDir Condition=" '$(CI_LIBS_PATH)' != '' ">$(CI_LIBS_PATH)</DepsDir>
+    <DepsDir Condition=" '$(CI_LIBS_PATH)' == '' ">..\..\..</DepsDir>
+  </PropertyGroup>
+  
   <ItemGroup>
     <Reference Include="ExileCore, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null">
-      <HintPath>..\..\..\ExileCore.dll</HintPath>
+      <HintPath>$(DepsDir)\ExileCore.dll</HintPath>
     </Reference>
     <Reference Include="GameOffsets, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null">
-      <HintPath>..\..\..\GameOffsets.dll</HintPath>
+      <HintPath>$(DepsDir)\GameOffsets.dll</HintPath>
     </Reference>
   </ItemGroup>
+  
   <ItemGroup>
     <PackageReference Include="ImGui.NET" Version="1.90.0.1" />
     <PackageReference Include="SharpDX" Version="4.2.0" />
