@@ -111,10 +111,10 @@ namespace BetterEssenceCorruptionHelper
         public ListNode WindowAnchor { get; set; } = new ListNode { Value = "Top Right", Values = ["Top Left", "Top Right"] };
 
         [Menu("Offset from Edge X", "Horizontal offset from anchor point")]
-        public RangeNode<int> OffsetX { get; set; } = new RangeNode<int>(30, 0, 500);
+        public RangeNode<int> OffsetX { get; set; } = new RangeNode<int>(20, 0, 500);
 
         [Menu("Offset from Edge Y", "Vertical offset from anchor point")]
-        public RangeNode<int> OffsetY { get; set; } = new RangeNode<int>(680, 0, 1000);
+        public RangeNode<int> OffsetY { get; set; } = new RangeNode<int>(620, 0, 1000);
 
         [Menu("Title Background", "Background color for window title")]
         public ColorNode TitleBackground { get; set; } = new ColorNode(new Color(0, 157, 255, 200));

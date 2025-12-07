@@ -12,15 +12,14 @@ namespace BetterEssenceCorruptionHelper
 {
     public class BetterEssenceCorruptionHelper : BaseSettingsPlugin<Settings>
     {
-        private Camera? _camera;
-
         private readonly Dictionary<long, EssenceEntityData> _trackedEntities = [];
         private int _entityIdCounter = 0;
 
-        private readonly HashSet<string> _discoveredEssences = [];
-        private readonly HashSet<string> _shouldCorruptEssences = [];
-        private readonly HashSet<string> _successfullyCorrupted = [];
-        private readonly HashSet<string> _missedCorruptions = [];
+        private readonly HashSet<long> _shouldCorruptEssences = [];
+        private readonly HashSet<long> _successfullyCorrupted = [];
+        private readonly HashSet<long> _missedCorruptions = [];
+        private readonly HashSet<long> _mistakenCorruptions = [];
+        private readonly HashSet<long> _killed = [];
 
         private string _cachedSessionStatsText = "";
         private DateTime _lastStatsUpdate = DateTime.MinValue;
@@ -32,22 +31,21 @@ namespace BetterEssenceCorruptionHelper
 
         public override bool Initialise()
         {
-            _camera = GameController.Game.IngameState.Camera;
             Name = "Better Essence Corruption Helper";
-
             DebugWindow.LogMsg($"{Name} initialized", 2, Color.Green);
-
             return base.Initialise();
         }
 
         public override void AreaChange(AreaInstance area)
         {
             _trackedEntities.Clear();
-            _discoveredEssences.Clear();
             _shouldCorruptEssences.Clear();
             _successfullyCorrupted.Clear();
             _missedCorruptions.Clear();
+            _mistakenCorruptions.Clear();
+            _killed.Clear();
             _entityIdCounter = 0;
+            _cachedWindowWidth = 0f; // Reset cached width on area change
             UpdateSessionStatsCache();
         }
 
@@ -58,14 +56,6 @@ namespace BetterEssenceCorruptionHelper
 
             if (IsAnyGameUIVisible())
                 return null;
-
-            // Cache screen dimensions if they change
-            var rect = GameController.Window.GetWindowRectangle();
-            if (_screenWidth != rect.Width || _screenHeight != rect.Height)
-            {
-                _screenWidth = (int)rect.Width;
-                _screenHeight = (int)rect.Height;
-            }
 
             ProcessEssences();
 
@@ -101,7 +91,6 @@ namespace BetterEssenceCorruptionHelper
                 }
                 else
                 {
-                    // Update entity reference
                     data.Entity = entity;
                 }
 
@@ -115,91 +104,63 @@ namespace BetterEssenceCorruptionHelper
         private void CleanupOldEssences(HashSet<long> currentMonoliths)
         {
             var removedEntities = new List<long>();
+
             foreach (var (address, data) in _trackedEntities)
             {
-                if (!currentMonoliths.Contains(address))
+                if (currentMonoliths.Contains(address))
+                    continue;
+
+                // Entity was removed (killed or despawned)
+                _killed.Add(address);
+
+                // Check for missed corruptions
+                if (_shouldCorruptEssences.Contains(address) &&
+                    !data.Analysis.IsCorrupted &&
+                    !_successfullyCorrupted.Contains(address) &&
+                    _missedCorruptions.Add(address) &&
+                    AnyDebugEnabled)
                 {
-                    var positionKey = GetPositionKeyFromData(data);
-
-                    // Check for missed corruptions
-                    if (_shouldCorruptEssences.Contains(positionKey) && !data.Analysis.IsCorrupted && !_successfullyCorrupted.Contains(positionKey))
-                    {
-                        if (!_missedCorruptions.Contains(positionKey))
-                        {
-                            _missedCorruptions.Add(positionKey);
-                            if (AnyDebugEnabled)
-                            {
-                                DebugWindow.LogMsg($"MISSED CORRUPTION: Essence {data.EntityId} at {positionKey} was ShouldCorrupt but killed without corrupting", 1, Color.Orange);
-                            }
-                        }
-                    }
-
-                    removedEntities.Add(address);
+                    DebugWindow.LogMsg(
+                        $"MISSED CORRUPTION: Essence {data.EntityId} (0x{address:X}) should have been corrupted but was killed",
+                        1, Color.Orange);
                 }
+
+                removedEntities.Add(address);
             }
 
             foreach (var address in removedEntities)
-            {
                 _trackedEntities.Remove(address);
-            }
         }
 
         private bool IsValidMonolith(Entity entity)
         {
-            if (entity == null ||
-                entity.Address == 0 ||
-                !entity.IsValid ||
-                !entity.IsTargetable ||
-                entity.Address == GameController.Player?.Address)
+            if (entity == null || entity.Address == 0 || !entity.IsValid ||
+                !entity.IsTargetable || entity.Address == GameController.Player?.Address)
                 return false;
 
             if (!entity.HasComponent<Render>() || !entity.HasComponent<Monolith>())
                 return false;
 
-            // Safety check
             try
             {
                 var pos = entity.PosNum;
-                if (pos.X == 0 && pos.Y == 0 && pos.Z == 0)
-                    return false;
+                return !(pos.X == 0 && pos.Y == 0 && pos.Z == 0);
             }
             catch
             {
                 return false;
             }
-
-            return true;
-        }
-
-        private static string GetPositionKey(Entity entity)
-        {
-            var pos = entity.PosNum;
-            return $"{(int)pos.X}_{(int)pos.Y}_{(int)pos.Z}";
-        }
-
-        private static string GetPositionKeyFromData(EssenceEntityData data)
-        {
-            if (data.LastKnownPosition.HasValue)
-            {
-                var pos = data.LastKnownPosition.Value;
-                return $"{(int)pos.X}_{(int)pos.Y}_{(int)pos.Z}";
-            }
-            return $"unknown_{data.EntityId}";
         }
 
         private void UpdateGlobalDiscovery(Entity entity, EssenceEntityData data)
         {
-            var positionKey = GetPositionKey(entity);
-
             var pos = entity.PosNum;
             data.LastKnownPosition = new Vector3(pos.X, pos.Y, pos.Z);
 
-            _discoveredEssences.Add(positionKey);
-
             if (data.State == EssenceState.ShouldCorrupt)
             {
-                _shouldCorruptEssences.Add(positionKey);
-                _missedCorruptions.Remove(positionKey);
+                _shouldCorruptEssences.Add(entity.Address);
+                _missedCorruptions.Remove(entity.Address);
             }
         }
 
@@ -216,36 +177,52 @@ namespace BetterEssenceCorruptionHelper
             {
                 data.Label = label;
                 var newAnalysis = EssenceLabelAnalyzer.Analyze(label);
+                var oldState = data.State;
+                var oldAnalysis = data.Analysis;
+                var wasCorruptedBefore = oldAnalysis.IsCorrupted;
 
-                if (!data.Analysis.IsCorrupted && newAnalysis.IsCorrupted)
+                data.Analysis = newAnalysis;
+                var newState = DetermineEssenceState(newAnalysis);
+
+                // Check if this essence just got corrupted
+                if (!wasCorruptedBefore && newAnalysis.IsCorrupted)
                 {
-                    data.PreviousAnalysis = data.Analysis;
-
-                    var positionKey = GetPositionKey(entity);
-                    _successfullyCorrupted.Add(positionKey);
-                    _missedCorruptions.Remove(positionKey);
+                    data.WasCorruptedByPlayer = true;
+                    data.PreviousAnalysis = oldAnalysis;
+                    data.PreviousState = oldState;
 
                     if (AnyDebugEnabled)
+                        DebugWindow.LogMsg($"Essence {data.EntityId} (0x{entity.Address:X}) corrupted. Old state: {oldState}, New state: {newState}", 1, Color.Yellow);
+
+                    // Track if this was a good corruption or a mistake
+                    if (oldState == EssenceState.ShouldCorrupt)
                     {
-                        DebugWindow.LogMsg($"SUCCESSFUL CORRUPTION: Essence {data.EntityId} at {positionKey} was corrupted", 1, Color.LightGreen);
+                        _successfullyCorrupted.Add(entity.Address);
+                        _missedCorruptions.Remove(entity.Address);
+
+                        if (AnyDebugEnabled)
+                            DebugWindow.LogMsg($"SUCCESSFUL CORRUPTION: Essence {data.EntityId} (0x{entity.Address:X})", 1, Color.LightGreen);
+                    }
+                    else if (oldState == EssenceState.ShouldKill && _mistakenCorruptions.Add(entity.Address) && AnyDebugEnabled)
+                    {
+                        DebugWindow.LogMsg($"MISTAKEN CORRUPTION: Essence {data.EntityId} (0x{entity.Address:X}) should have been killed!", 1, Color.OrangeRed);
                     }
                 }
 
-                data.Analysis = newAnalysis;
-                data.State = DetermineEssenceState(newAnalysis);
+                data.State = newState;
 
-                if (AnyDebugEnabled && data.State != data.PreviousState)
+                // Update PreviousState for non-corruption state changes
+                if ((wasCorruptedBefore || !newAnalysis.IsCorrupted) && newState != oldState)
                 {
-                    DebugWindow.LogMsg($"Essence {data.EntityId}: {data.PreviousState} -> {data.State}", 1);
-                    data.PreviousState = data.State;
+                    data.PreviousState = oldState;
+                    if (AnyDebugEnabled)
+                        DebugWindow.LogMsg($"Essence {data.EntityId}: {oldState} -> {newState}", 1);
                 }
             }
             catch (Exception ex)
             {
                 if (AnyDebugEnabled)
-                {
                     DebugWindow.LogError($"UpdateEntityData failed: {ex.Message}");
-                }
                 data.Label = null;
             }
         }
@@ -255,10 +232,7 @@ namespace BetterEssenceCorruptionHelper
             if (analysis.IsCorrupted)
                 return EssenceState.ShouldKill;
 
-            if (analysis.HasValuablePattern)
-                return EssenceState.ShouldCorrupt;
-
-            return EssenceState.ShouldKill;
+            return analysis.HasValuablePattern ? EssenceState.ShouldCorrupt : EssenceState.ShouldKill;
         }
 
         private LabelOnGround? FindLabelForEntity(Entity entity)
@@ -279,32 +253,30 @@ namespace BetterEssenceCorruptionHelper
             {
                 foreach (var data in _trackedEntities.Values)
                 {
-                    if (data.State == EssenceState.ShouldCorrupt && Settings.Indicators.CorruptMe.ShowCorruptMe.Value)
+                    bool isCorruptTarget = data.State == EssenceState.ShouldCorrupt;
+
+                    if (isCorruptTarget && Settings.Indicators.CorruptMe.ShowCorruptMe.Value)
                     {
                         if (Settings.Indicators.CorruptMe.DrawBorder.Value)
-                            DrawBorder(data, isCorruptTarget: true);
+                            DrawBorder(data, true);
                         if (Settings.Indicators.CorruptMe.DrawText.Value)
-                            DrawText(data, isCorruptTarget: true);
+                            DrawText(data, true);
                     }
                     else if (data.State == EssenceState.ShouldKill && Settings.Indicators.KillReady.ShowKillReady.Value)
                     {
                         if (Settings.Indicators.KillReady.DrawBorder.Value)
-                            DrawBorder(data, isCorruptTarget: false);
+                            DrawBorder(data, false);
                         if (Settings.Indicators.KillReady.DrawText.Value)
-                            DrawText(data, isCorruptTarget: false);
+                            DrawText(data, false);
                     }
 
                     if (Settings.Debug.ShowDebugInfo.Value && data.Label?.Label != null)
-                    {
                         DrawEntityDebugWindow(data);
-                    }
                 }
             }
 
             if (ShouldShowMapStats())
-            {
                 DrawMapStatsWindow();
-            }
         }
 
         private void UpdateLabelReferences()
@@ -312,22 +284,14 @@ namespace BetterEssenceCorruptionHelper
             foreach (var data in _trackedEntities.Values)
             {
                 if (data.Label == null && data.Entity != null)
-                {
                     data.Label = FindLabelForEntity(data.Entity);
-                }
             }
         }
 
         private bool ShouldShowMapStats()
         {
-            if (!Settings.MapStats.ShowMapStats.Value)
-                return false;
-
-            // If we're in town/hideout and the option is disabled, don't show
-            if (GameController.Area.CurrentArea.IsPeaceful && !Settings.MapStats.ShowInTownHideout.Value)
-                return false;
-
-            return true;
+            return Settings.MapStats.ShowMapStats.Value &&
+                   (!GameController.Area.CurrentArea.IsPeaceful || Settings.MapStats.ShowInTownHideout.Value);
         }
 
         private void DrawMapStatsWindow()
@@ -335,15 +299,17 @@ namespace BetterEssenceCorruptionHelper
             if (string.IsNullOrEmpty(_cachedSessionStatsText))
                 return;
 
-            var screenWidth = GameController.Window.GetWindowRectangle().Width;
-            var screenHeight = GameController.Window.GetWindowRectangle().Height;
-
-            var windowWidth = _cachedWindowWidth;
-            if (windowWidth == 0f)
+            // Cache screen dimensions on first draw or if not set
+            if (_screenWidth == 0 || _screenHeight == 0)
             {
-                windowWidth = CalculateMapStatsWindowWidth(_cachedSessionStatsText);
-                _cachedWindowWidth = windowWidth;
+                var rect = GameController.Window.GetWindowRectangle();
+                _screenWidth = (int)rect.Width;
+                _screenHeight = (int)rect.Height;
             }
+
+            // Use cached window width
+            if (_cachedWindowWidth == 0f)
+                _cachedWindowWidth = CalculateMapStatsWindowWidth(_cachedSessionStatsText);
 
             // Calculate window height for clamping
             const int padding = 8;
@@ -355,28 +321,16 @@ namespace BetterEssenceCorruptionHelper
             var contentHeight = contentSize.Y + padding * 2;
             var totalHeight = titleHeight + contentHeight;
 
-            Vector2 position;
-
-            if (Settings.MapStats.WindowAnchor.Value == "Top Left")
-            {
-                position = new Vector2(
-                    Settings.MapStats.OffsetX.Value,
-                    Settings.MapStats.OffsetY.Value
-                );
-            }
-            else // Top Right
-            {
-                position = new Vector2(
-                    screenWidth - windowWidth - Settings.MapStats.OffsetX.Value,
-                    Settings.MapStats.OffsetY.Value
-                );
-            }
+            // Calculate position based on anchor
+            Vector2 position = Settings.MapStats.WindowAnchor.Value == "Top Left"
+                ? new Vector2(Settings.MapStats.OffsetX.Value, Settings.MapStats.OffsetY.Value)
+                : new Vector2(_screenWidth - _cachedWindowWidth - Settings.MapStats.OffsetX.Value, Settings.MapStats.OffsetY.Value);
 
             // Clamp to screen bounds
-            position.X = Math.Max(0, Math.Min(position.X, screenWidth - windowWidth));
-            position.Y = Math.Max(0, Math.Min(position.Y, screenHeight - totalHeight));
+            position.X = Math.Max(0, Math.Min(position.X, _screenWidth - _cachedWindowWidth));
+            position.Y = Math.Max(0, Math.Min(position.Y, _screenHeight - totalHeight));
 
-            DrawTextWindow(position, "Essence Map Stats", _cachedSessionStatsText,
+            DrawTextWindow(position, "Essence Map Stats", _cachedSessionStatsText, _cachedWindowWidth,
                 Settings.MapStats.TitleBackground.Value,
                 Settings.MapStats.ContentBackground.Value,
                 Settings.MapStats.TitleColor.Value,
@@ -388,16 +342,22 @@ namespace BetterEssenceCorruptionHelper
         {
             var sb = new StringBuilder();
 
-            sb.AppendLine("Current Map:");
-            sb.AppendLine($"  Found: {_discoveredEssences.Count}");
+            // Active tracking
+            sb.AppendLine("Live Tracking");
+            sb.AppendLine($"  Found: {_trackedEntities.Count}");
             sb.AppendLine($"  Should Corrupt: {_shouldCorruptEssences.Count}");
-            sb.AppendLine($"  Successfully Corrupted: {_successfullyCorrupted.Count}");
-            sb.AppendLine($"  Missed Corruptions: {_missedCorruptions.Count}");
+
+            sb.AppendLine();
+
+            // Map totals
+            sb.AppendLine("Map Totals");
+            sb.AppendLine($"  Killed: {_killed.Count}");
+            sb.AppendLine($"  Corrupted: {_successfullyCorrupted.Count}");
+            sb.AppendLine($"  Missed: {_missedCorruptions.Count}");
+            sb.AppendLine($"  Mistakes: {_mistakenCorruptions.Count}");
 
             _cachedSessionStatsText = sb.ToString();
             _lastStatsUpdate = DateTime.Now;
-
-            // Recalculate window width when stats change
             _cachedWindowWidth = CalculateMapStatsWindowWidth(_cachedSessionStatsText);
         }
 
@@ -413,7 +373,7 @@ namespace BetterEssenceCorruptionHelper
             return Math.Max(titleSize.X, contentSize.X) + padding * 2;
         }
 
-        private void DrawTextWindow(Vector2 position, string title, string content,
+        private void DrawTextWindow(Vector2 position, string title, string content, float width,
             Color titleBg, Color contentBg, Color titleColor, Color textColor, Color borderColor)
         {
             const int padding = 8;
@@ -423,7 +383,6 @@ namespace BetterEssenceCorruptionHelper
             var titleSize = Graphics.MeasureText(title, titleFontSize);
             var contentSize = Graphics.MeasureText(content, contentFontSize);
 
-            float width = Math.Max(titleSize.X, contentSize.X) + padding * 2;
             float titleHeight = titleSize.Y + padding;
             float contentHeight = contentSize.Y + padding * 2;
             float totalHeight = titleHeight + contentHeight;
@@ -431,79 +390,17 @@ namespace BetterEssenceCorruptionHelper
             var titleRect = new RectangleF(position.X, position.Y, width, titleHeight);
             var contentRect = new RectangleF(position.X, position.Y + titleHeight, width, contentHeight);
 
-            // Draw title bar
+            // Draw backgrounds
             Graphics.DrawBox(titleRect, titleBg);
-            Graphics.DrawText(title,
-                new Vector2(position.X + padding, position.Y + padding / 2),
-                titleColor, FontAlign.Left);
-
-            // Draw content background
             Graphics.DrawBox(contentRect, contentBg);
 
-            // Draw content text
-            Graphics.DrawText(content,
-                new Vector2(position.X + padding, position.Y + titleHeight + padding / 2),
-                textColor, FontAlign.Left);
+            // Draw text
+            Graphics.DrawText(title, new Vector2(position.X + padding, position.Y + padding / 2), titleColor, FontAlign.Left);
+            Graphics.DrawText(content, new Vector2(position.X + padding, position.Y + titleHeight + padding / 2), textColor, FontAlign.Left);
 
             // Draw border
-            Graphics.DrawFrame(new RectangleF(position.X, position.Y, width, totalHeight),
-                borderColor, 1);
+            Graphics.DrawFrame(new RectangleF(position.X, position.Y, width, totalHeight), borderColor, 1);
         }
-
-        private void DrawEntityDebugWindow(EssenceEntityData data)
-        {
-            if (data.Label?.Label == null) return;
-
-            var labelRect = data.Label.Label.GetClientRectCache;
-            var borderRect = GetBorderRect(labelRect, isCorruptTarget: data.State == EssenceState.ShouldCorrupt);
-
-            var debugLines = BuildDebugContent(data);
-
-            // Calculate required width
-            float maxWidth = 0;
-            using (Graphics.SetTextScale(1.0f))
-            {
-                foreach (var segments in debugLines)
-                {
-                    float lineWidth = 0;
-                    foreach (var (text, _) in segments)
-                    {
-                        lineWidth += Graphics.MeasureText(text).X;
-                    }
-                    if (lineWidth > maxWidth)
-                        maxWidth = lineWidth;
-                }
-            }
-
-            var debugRect = new RectangleF(
-                borderRect.Right,
-                borderRect.Top,
-                Math.Max(180, maxWidth + 15),
-                10 + (debugLines.Count * 16)
-            );
-
-            var bgColor = Settings.Debug.DebugBackgroundColor.Value;
-            bgColor.A = (byte)(Settings.Debug.DebugBackgroundOpacity.Value * 255);
-            Graphics.DrawBox(debugRect, bgColor);
-            Graphics.DrawFrame(debugRect, Settings.Debug.DebugBorderColor.Value, 1);
-
-            using (Graphics.SetTextScale(1.0f))
-            {
-                for (int i = 0; i < debugLines.Count; i++)
-                {
-                    var segments = debugLines[i];
-                    float x = debugRect.X + 5;
-
-                    foreach (var (text, color) in segments)
-                    {
-                        var size = Graphics.MeasureText(text);
-                        Graphics.DrawText(text, new Vector2(x, debugRect.Y + 5 + (i * 16)), color);
-                        x += size.X;
-                    }
-                }
-            }
-        }
-
 
         private RectangleF GetBorderRect(RectangleF rect, bool isCorruptTarget)
         {
@@ -515,57 +412,12 @@ namespace BetterEssenceCorruptionHelper
                 ? Settings.Indicators.CorruptMe.BorderMargin.Value
                 : Settings.Indicators.KillReady.BorderMargin.Value;
 
-            var borderRect = new RectangleF(
+            return new RectangleF(
                 rect.X - thickness / 2f + margin,
                 rect.Y - thickness / 2f,
                 Math.Max(rect.Width + thickness - margin * 2, 10f),
                 Math.Max(rect.Height + thickness, 10f)
             );
-
-            return borderRect;
-        }
-
-        private static List<List<(string text, Color color)>> BuildDebugContent(EssenceEntityData data)
-        {
-            var lines = new List<List<(string, Color)>>();
-
-            string stateString = data.State switch
-            {
-                EssenceState.ShouldCorrupt => "CORRUPT-ME",
-                EssenceState.ShouldKill => "KILL-ME",
-                _ => "UNKNOWN"
-            };
-
-            Color stateColor = data.State == EssenceState.ShouldCorrupt ? Color.Red : Color.Green;
-            Color CountColor(int v) => v == 0 ? Color.White : Color.Green;
-            Color BoolColor(bool b) => b ? Color.Green : Color.Red;
-
-            lines.Add([($"Essence #{data.EntityId} ", Color.White)]);
-            lines.Add([("Status: ", Color.White), (stateString, stateColor)]);
-
-            lines.Add([]);
-
-            if (!data.Analysis.IsValid)
-            {
-                lines.Add([("Analysis: INVALID", Color.Red)]);
-                return lines;
-            }
-
-            lines.Add([("Total: ", Color.White), ($"{data.Analysis.EssenceCount}", CountColor(data.Analysis.EssenceCount))]);
-            lines.Add([("Deafening: ", Color.White), ($"{data.Analysis.DeafeningCount}", CountColor(data.Analysis.DeafeningCount))]);
-            lines.Add([("Shrieking: ", Color.White), ($"{data.Analysis.ShriekingCount}", CountColor(data.Analysis.ShriekingCount))]);
-            lines.Add([("Screaming: ", Color.White), ($"{data.Analysis.ScreamingCount}", CountColor(data.Analysis.ScreamingCount))]);
-            lines.Add([("Wailing: ", Color.White), ($"{data.Analysis.WailingCount}", CountColor(data.Analysis.WailingCount))]);
-            lines.Add([("Weeping: ", Color.White), ($"{data.Analysis.WeepingCount}", CountColor(data.Analysis.WeepingCount))]);
-            lines.Add([("Muttering: ", Color.White), ($"{data.Analysis.MutteringCount}", CountColor(data.Analysis.MutteringCount))]);
-
-            lines.Add([]);
-            lines.Add([("Flags:", Color.White)]);
-            lines.Add([("  MEDS: ", Color.White), ($"{data.Analysis.HasMeds}", BoolColor(data.Analysis.HasMeds))]);
-            lines.Add([("  Corrupted: ", Color.White), ($"{data.Analysis.IsCorrupted}", BoolColor(data.Analysis.IsCorrupted))]);
-            lines.Add([("  Valuable: ", Color.White), ($"{data.Analysis.HasValuablePattern}", BoolColor(data.Analysis.HasValuablePattern))]);
-
-            return lines;
         }
 
         private void DrawBorder(EssenceEntityData data, bool isCorruptTarget)
@@ -573,27 +425,17 @@ namespace BetterEssenceCorruptionHelper
             if (data.Label?.Label == null) return;
 
             var rect = data.Label.Label.GetClientRectCache;
-
-            float thickness = isCorruptTarget
-                ? Settings.Indicators.CorruptMe.BorderThickness.Value
-                : Settings.Indicators.KillReady.BorderThickness.Value;
-
-            float margin = isCorruptTarget
-                ? Settings.Indicators.CorruptMe.BorderMargin.Value
-                : Settings.Indicators.KillReady.BorderMargin.Value;
-
-            var borderRect = new RectangleF(
-                rect.X - thickness / 2f + margin,
-                rect.Y - thickness / 2f,
-                Math.Max(rect.Width + thickness - margin * 2, 10f),
-                Math.Max(rect.Height + thickness, 10f)
-            );
+            var borderRect = GetBorderRect(rect, isCorruptTarget);
 
             var color = isCorruptTarget
                 ? Settings.Indicators.CorruptMe.BorderColor.Value
                 : Settings.Indicators.KillReady.BorderColor.Value;
 
-            Graphics.DrawFrame(borderRect, color, (int)thickness);
+            var thickness = (int)(isCorruptTarget
+                ? Settings.Indicators.CorruptMe.BorderThickness.Value
+                : Settings.Indicators.KillReady.BorderThickness.Value);
+
+            Graphics.DrawFrame(borderRect, color, thickness);
         }
 
         private void DrawText(EssenceEntityData data, bool isCorruptTarget)
@@ -615,11 +457,7 @@ namespace BetterEssenceCorruptionHelper
 
                 using (Graphics.SetTextScale(textSize))
                 {
-                    var textPos = new Vector2(
-                        rect.X + rect.Width / 2,
-                        rect.Y - textSize * 25 + 15
-                    );
-
+                    var textPos = new Vector2(rect.X + rect.Width / 2, rect.Y - textSize * 25 + 15);
                     var measuredSize = Graphics.MeasureText(text);
                     var bgRect = new RectangleF(
                         textPos.X - measuredSize.X / 2 - 2,
@@ -637,6 +475,139 @@ namespace BetterEssenceCorruptionHelper
                 if (AnyDebugEnabled)
                     DebugWindow.LogError($"DrawText failed: {ex.Message}");
             }
+        }
+
+        private void DrawEntityDebugWindow(EssenceEntityData data)
+        {
+            if (data.Label?.Label == null) return;
+
+            var labelRect = data.Label.Label.GetClientRectCache;
+            var borderRect = GetBorderRect(labelRect, data.State == EssenceState.ShouldCorrupt);
+            var debugLines = BuildDebugContent(data);
+
+            // Calculate required width
+            float maxWidth = 0;
+            using (Graphics.SetTextScale(1.0f))
+            {
+                foreach (var segments in debugLines)
+                {
+                    float lineWidth = segments.Sum(seg => Graphics.MeasureText(seg.text).X);
+                    if (lineWidth > maxWidth)
+                        maxWidth = lineWidth;
+                }
+            }
+
+            var debugRect = new RectangleF(
+                borderRect.Right,
+                borderRect.Top,
+                Math.Max(260, maxWidth + 15),
+                10 + (debugLines.Count * 16)
+            );
+
+            var bgColor = Settings.Debug.DebugBackgroundColor.Value;
+            bgColor.A = (byte)(Settings.Debug.DebugBackgroundOpacity.Value * 255);
+            Graphics.DrawBox(debugRect, bgColor);
+            Graphics.DrawFrame(debugRect, Settings.Debug.DebugBorderColor.Value, 1);
+
+            using (Graphics.SetTextScale(1.0f))
+            {
+                for (int i = 0; i < debugLines.Count; i++)
+                {
+                    float x = debugRect.X + 5;
+                    foreach (var (text, color) in debugLines[i])
+                    {
+                        Graphics.DrawText(text, new Vector2(x, debugRect.Y + 5 + (i * 16)), color);
+                        x += Graphics.MeasureText(text).X;
+                    }
+                }
+            }
+        }
+
+        private static List<List<(string text, Color color)>> BuildDebugContent(EssenceEntityData data)
+        {
+            var lines = new List<List<(string, Color)>>();
+
+            string stateString = data.State switch
+            {
+                EssenceState.ShouldCorrupt => "CORRUPT-ME",
+                EssenceState.ShouldKill => "KILL-ME",
+                _ => "UNKNOWN"
+            };
+
+            Color stateColor = data.State == EssenceState.ShouldCorrupt ? Color.Red : Color.Green;
+
+            lines.Add([($"Essence #{data.EntityId}", Color.White)]);
+            lines.Add([("Status: ", Color.White), (stateString, stateColor)]);
+
+            if (data.WasCorruptedByPlayer)
+                lines.Add([("Player Corrupted: ", Color.White), ("Yes", Color.Yellow)]);
+
+            lines.Add([]);
+            lines.Add([("Addr: ", Color.White), ($"0x{data.Address:X12}", Color.LightSkyBlue)]);
+
+            if (data.LastKnownPosition.HasValue)
+            {
+                var pos = data.LastKnownPosition.Value;
+                lines.Add([("Pos: ", Color.White), ($"({pos.X:F0}, {pos.Y:F0}, {pos.Z:F0})", Color.LightYellow)]);
+            }
+
+            lines.Add([]);
+
+            if (!data.Analysis.IsValid)
+            {
+                lines.Add([("ANALYSIS: INVALID", Color.Red)]);
+                return lines;
+            }
+
+            bool showComparison = data.WasCorruptedByPlayer && data.PreviousAnalysis.HasValue && data.PreviousAnalysis.Value.IsValid;
+
+            if (showComparison)
+            {
+                var prev = data.PreviousAnalysis!.Value;
+                lines.Add([("ANALYSIS (Before -> After)", Color.Cyan)]);
+
+                AddComparisonLine(lines, "Total", prev.EssenceCount, data.Analysis.EssenceCount);
+                if (prev.DeafeningCount > 0 || data.Analysis.DeafeningCount > 0)
+                    AddComparisonLine(lines, "Deafening", prev.DeafeningCount, data.Analysis.DeafeningCount);
+                if (prev.ShriekingCount > 0 || data.Analysis.ShriekingCount > 0)
+                    AddComparisonLine(lines, "Shrieking", prev.ShriekingCount, data.Analysis.ShriekingCount);
+                if (prev.ScreamingCount > 0 || data.Analysis.ScreamingCount > 0)
+                    AddComparisonLine(lines, "Screaming", prev.ScreamingCount, data.Analysis.ScreamingCount);
+
+                lines.Add([]);
+                AddComparisonLineBool(lines, "MEDS", prev.HasMeds, data.Analysis.HasMeds);
+                AddComparisonLineBool(lines, "Valuable", prev.HasValuablePattern, data.Analysis.HasValuablePattern);
+            }
+            else
+            {
+                lines.Add([("ANALYSIS", Color.Cyan)]);
+                lines.Add([("Total: ", Color.White), ($"{data.Analysis.EssenceCount}", Color.Green)]);
+
+                if (data.Analysis.DeafeningCount > 0)
+                    lines.Add([("Deafening: ", Color.White), ($"{data.Analysis.DeafeningCount}", Color.Green)]);
+                if (data.Analysis.ShriekingCount > 0)
+                    lines.Add([("Shrieking: ", Color.White), ($"{data.Analysis.ShriekingCount}", Color.Green)]);
+                if (data.Analysis.ScreamingCount > 0)
+                    lines.Add([("Screaming: ", Color.White), ($"{data.Analysis.ScreamingCount}", Color.White)]);
+
+                lines.Add([]);
+                lines.Add([("MEDS: ", Color.White), (data.Analysis.HasMeds ? "Yes" : "No", data.Analysis.HasMeds ? Color.Green : Color.Red)]);
+                lines.Add([("Valuable: ", Color.White), (data.Analysis.HasValuablePattern ? "Yes" : "No", data.Analysis.HasValuablePattern ? Color.Green : Color.Red)]);
+            }
+
+            return lines;
+        }
+
+        private static void AddComparisonLine(List<List<(string text, Color color)>> lines, string label, int prev, int curr)
+        {
+            Color currColor = curr > prev ? Color.Green : curr < prev ? Color.Red : Color.White;
+            lines.Add([($"{label}: ", Color.White), ($"{prev}", Color.White), (" -> ", Color.White), ($"{curr}", currColor)]);
+        }
+
+        private static void AddComparisonLineBool(List<List<(string text, Color color)>> lines, string label, bool prev, bool curr)
+        {
+            Color currColor = curr ? Color.Green : Color.Red;
+            lines.Add([($"{label}: ", Color.White), (prev ? "Yes" : "No", Color.White), (" -> ", Color.White), (curr ? "Yes" : "No", currColor)]);
         }
 
         private bool IsAnyGameUIVisible()
@@ -664,10 +635,11 @@ namespace BetterEssenceCorruptionHelper
         public LabelOnGround? Label { get; set; }
         public Entity? Entity { get; set; }
         public EssenceAnalysis Analysis { get; set; }
-        public EssenceAnalysis PreviousAnalysis { get; set; }
-        public EssenceState State { get; set; }
-        public EssenceState PreviousState { get; set; }
-        public SharpDX.Vector3? LastKnownPosition { get; set; }
+        public EssenceAnalysis? PreviousAnalysis { get; set; }
+        public EssenceState State { get; set; } = EssenceState.None;
+        public EssenceState PreviousState { get; set; } = EssenceState.None;
+        public Vector3? LastKnownPosition { get; set; }
+        public bool WasCorruptedByPlayer { get; set; } = false;
     }
 
     internal enum EssenceState
