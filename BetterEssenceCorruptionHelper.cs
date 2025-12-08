@@ -1,10 +1,10 @@
-﻿using System.Text;
-using ExileCore;
+﻿using ExileCore;
 using ExileCore.PoEMemory.Components;
 using ExileCore.PoEMemory.Elements;
 using ExileCore.PoEMemory.MemoryObjects;
 using ExileCore.Shared.Enums;
 using SharpDX;
+using System.Text;
 using Vector2 = System.Numerics.Vector2;
 using Vector3 = SharpDX.Vector3;
 
@@ -13,13 +13,10 @@ namespace BetterEssenceCorruptionHelper
     public class BetterEssenceCorruptionHelper : BaseSettingsPlugin<Settings>
     {
         private readonly Dictionary<long, EssenceEntityData> _trackedEntities = [];
+        private readonly List<EssenceEntityData> _completedEssences = [];
         private int _entityIdCounter = 0;
 
-        private readonly HashSet<long> _shouldCorruptEssences = [];
-        private readonly HashSet<long> _successfullyCorrupted = [];
-        private readonly HashSet<long> _missedCorruptions = [];
-        private readonly HashSet<long> _mistakenCorruptions = [];
-        private readonly HashSet<long> _killed = [];
+        private readonly MapStatistics _mapStats = new();
 
         private string _cachedSessionStatsText = "";
         private DateTime _lastStatsUpdate = DateTime.MinValue;
@@ -39,13 +36,10 @@ namespace BetterEssenceCorruptionHelper
         public override void AreaChange(AreaInstance area)
         {
             _trackedEntities.Clear();
-            _shouldCorruptEssences.Clear();
-            _successfullyCorrupted.Clear();
-            _missedCorruptions.Clear();
-            _mistakenCorruptions.Clear();
-            _killed.Clear();
+            _completedEssences.Clear();
             _entityIdCounter = 0;
-            _cachedWindowWidth = 0f; // Reset cached width on area change
+            _cachedWindowWidth = 0f;
+            _mapStats.Reset();
             UpdateSessionStatsCache();
         }
 
@@ -95,7 +89,10 @@ namespace BetterEssenceCorruptionHelper
                 }
 
                 UpdateEntityData(entity, data);
-                UpdateGlobalDiscovery(entity, data);
+
+                // Update position
+                var pos = entity.PosNum;
+                data.LastKnownPosition = new Vector3(pos.X, pos.Y, pos.Z);
             }
 
             CleanupOldEssences(currentMonoliths);
@@ -111,20 +108,26 @@ namespace BetterEssenceCorruptionHelper
                     continue;
 
                 // Entity was removed (killed or despawned)
-                _killed.Add(address);
+                data.WasKilled = true;
+                _mapStats.IncrementKilled();
 
                 // Check for missed corruptions
-                if (_shouldCorruptEssences.Contains(address) &&
+                if (data.State == EssenceState.ShouldCorrupt &&
                     !data.Analysis.IsCorrupted &&
-                    !_successfullyCorrupted.Contains(address) &&
-                    _missedCorruptions.Add(address) &&
-                    AnyDebugEnabled)
+                    !data.WasCorruptedByPlayer)
                 {
-                    DebugWindow.LogMsg(
-                        $"MISSED CORRUPTION: Essence {data.EntityId} (0x{address:X}) should have been corrupted but was killed",
-                        1, Color.Orange);
+                    data.MissedCorruption = true;
+                    _mapStats.IncrementMissed();
+
+                    if (AnyDebugEnabled)
+                    {
+                        DebugWindow.LogMsg(
+                            $"MISSED CORRUPTION: Essence {data.EntityId} (0x{address:X}) should have been corrupted but was killed",
+                            1, Color.Orange);
+                    }
                 }
 
+                _completedEssences.Add(data);
                 removedEntities.Add(address);
             }
 
@@ -152,18 +155,6 @@ namespace BetterEssenceCorruptionHelper
             }
         }
 
-        private void UpdateGlobalDiscovery(Entity entity, EssenceEntityData data)
-        {
-            var pos = entity.PosNum;
-            data.LastKnownPosition = new Vector3(pos.X, pos.Y, pos.Z);
-
-            if (data.State == EssenceState.ShouldCorrupt)
-            {
-                _shouldCorruptEssences.Add(entity.Address);
-                _missedCorruptions.Remove(entity.Address);
-            }
-        }
-
         private void UpdateEntityData(Entity entity, EssenceEntityData data)
         {
             var label = FindLabelForEntity(entity);
@@ -173,57 +164,48 @@ namespace BetterEssenceCorruptionHelper
                 return;
             }
 
-            try
+            data.Label = label;
+            var newAnalysis = EssenceLabelAnalyzer.Analyze(label);
+            var oldState = data.State;
+            var wasCorruptedBefore = data.Analysis.IsCorrupted;
+
+            data.Analysis = newAnalysis;
+            var newState = DetermineEssenceState(newAnalysis);
+
+            // Check if this essence just got corrupted
+            if (!wasCorruptedBefore && newAnalysis.IsCorrupted)
             {
-                data.Label = label;
-                var newAnalysis = EssenceLabelAnalyzer.Analyze(label);
-                var oldState = data.State;
-                var oldAnalysis = data.Analysis;
-                var wasCorruptedBefore = oldAnalysis.IsCorrupted;
+                data.WasCorruptedByPlayer = true;
+                data.PreviousAnalysis = data.Analysis;
+                data.PreviousState = oldState;
 
-                data.Analysis = newAnalysis;
-                var newState = DetermineEssenceState(newAnalysis);
+                if (AnyDebugEnabled)
+                    DebugWindow.LogMsg($"Essence {data.EntityId} (0x{entity.Address:X}) corrupted. Old state: {oldState}, New state: {newState}", 1, Color.Yellow);
 
-                // Check if this essence just got corrupted
-                if (!wasCorruptedBefore && newAnalysis.IsCorrupted)
+                // Track outcomes and update map statistics
+                if (oldState == EssenceState.ShouldCorrupt)
                 {
-                    data.WasCorruptedByPlayer = true;
-                    data.PreviousAnalysis = oldAnalysis;
-                    data.PreviousState = oldState;
-
+                    _mapStats.IncrementCorrupted();
                     if (AnyDebugEnabled)
-                        DebugWindow.LogMsg($"Essence {data.EntityId} (0x{entity.Address:X}) corrupted. Old state: {oldState}, New state: {newState}", 1, Color.Yellow);
-
-                    // Track if this was a good corruption or a mistake
-                    if (oldState == EssenceState.ShouldCorrupt)
-                    {
-                        _successfullyCorrupted.Add(entity.Address);
-                        _missedCorruptions.Remove(entity.Address);
-
-                        if (AnyDebugEnabled)
-                            DebugWindow.LogMsg($"SUCCESSFUL CORRUPTION: Essence {data.EntityId} (0x{entity.Address:X})", 1, Color.LightGreen);
-                    }
-                    else if (oldState == EssenceState.ShouldKill && _mistakenCorruptions.Add(entity.Address) && AnyDebugEnabled)
-                    {
-                        DebugWindow.LogMsg($"MISTAKEN CORRUPTION: Essence {data.EntityId} (0x{entity.Address:X}) should have been killed!", 1, Color.OrangeRed);
-                    }
+                        DebugWindow.LogMsg($"SUCCESSFUL CORRUPTION: Essence {data.EntityId} (0x{entity.Address:X})", 1, Color.LightGreen);
                 }
-
-                data.State = newState;
-
-                // Update PreviousState for non-corruption state changes
-                if ((wasCorruptedBefore || !newAnalysis.IsCorrupted) && newState != oldState)
+                else if (oldState == EssenceState.ShouldKill)
                 {
-                    data.PreviousState = oldState;
+                    data.MistakenCorruption = true;
+                    _mapStats.IncrementMistakes();
                     if (AnyDebugEnabled)
-                        DebugWindow.LogMsg($"Essence {data.EntityId}: {oldState} -> {newState}", 1);
+                        DebugWindow.LogMsg($"MISTAKEN CORRUPTION: Essence {data.EntityId} (0x{entity.Address:X}) should have been killed!", 1, Color.OrangeRed);
                 }
             }
-            catch (Exception ex)
+
+            data.State = newState;
+
+            // Update PreviousState for non-corruption state changes
+            if ((wasCorruptedBefore || !newAnalysis.IsCorrupted) && newState != oldState)
             {
+                data.PreviousState = oldState;
                 if (AnyDebugEnabled)
-                    DebugWindow.LogError($"UpdateEntityData failed: {ex.Message}");
-                data.Label = null;
+                    DebugWindow.LogMsg($"Essence {data.EntityId}: {oldState} -> {newState}", 1);
             }
         }
 
@@ -246,7 +228,11 @@ namespace BetterEssenceCorruptionHelper
             if (!Settings.Enable.Value || !GameController.InGame || IsAnyGameUIVisible())
                 return;
 
-            UpdateLabelReferences();
+            foreach (var data in _trackedEntities.Values)
+            {
+                if (data.Label == null && data.Entity != null)
+                    data.Label = FindLabelForEntity(data.Entity);
+            }
 
             // Draw visuals for essences
             if (Settings.Indicators.EnableAllIndicators.Value)
@@ -275,23 +261,8 @@ namespace BetterEssenceCorruptionHelper
                 }
             }
 
-            if (ShouldShowMapStats())
+            if (Settings.MapStats.ShowMapStats.Value && (!GameController.Area.CurrentArea.IsPeaceful || Settings.MapStats.ShowInTownHideout.Value))
                 DrawMapStatsWindow();
-        }
-
-        private void UpdateLabelReferences()
-        {
-            foreach (var data in _trackedEntities.Values)
-            {
-                if (data.Label == null && data.Entity != null)
-                    data.Label = FindLabelForEntity(data.Entity);
-            }
-        }
-
-        private bool ShouldShowMapStats()
-        {
-            return Settings.MapStats.ShowMapStats.Value &&
-                   (!GameController.Area.CurrentArea.IsPeaceful || Settings.MapStats.ShowInTownHideout.Value);
         }
 
         private void DrawMapStatsWindow()
@@ -342,19 +313,11 @@ namespace BetterEssenceCorruptionHelper
         {
             var sb = new StringBuilder();
 
-            // Active tracking
-            sb.AppendLine("Live Tracking");
-            sb.AppendLine($"  Found: {_trackedEntities.Count}");
-            sb.AppendLine($"  Should Corrupt: {_shouldCorruptEssences.Count}");
-
-            sb.AppendLine();
-
-            // Map totals
             sb.AppendLine("Map Totals");
-            sb.AppendLine($"  Killed: {_killed.Count}");
-            sb.AppendLine($"  Corrupted: {_successfullyCorrupted.Count}");
-            sb.AppendLine($"  Missed: {_missedCorruptions.Count}");
-            sb.AppendLine($"  Mistakes: {_mistakenCorruptions.Count}");
+            sb.AppendLine($"  Killed: {_mapStats.TotalKilled}");
+            sb.AppendLine($"  Corrupted: {_mapStats.TotalCorrupted}");
+            sb.AppendLine($"  Missed: {_mapStats.TotalMissed}");
+            sb.AppendLine($"  Mistakes: {_mapStats.TotalMistakes}");
 
             _cachedSessionStatsText = sb.ToString();
             _lastStatsUpdate = DateTime.Now;
@@ -370,7 +333,7 @@ namespace BetterEssenceCorruptionHelper
             var titleSize = Graphics.MeasureText("Essence Map Stats", titleFontSize);
             var contentSize = Graphics.MeasureText(content, contentFontSize);
 
-            return Math.Max(titleSize.X, contentSize.X) + padding * 2;
+            return Math.Max(titleSize.X + 10, contentSize.X) + padding * 2;
         }
 
         private void DrawTextWindow(Vector2 position, string title, string content, float width,
@@ -394,8 +357,22 @@ namespace BetterEssenceCorruptionHelper
             Graphics.DrawBox(titleRect, titleBg);
             Graphics.DrawBox(contentRect, contentBg);
 
-            // Draw text
-            Graphics.DrawText(title, new Vector2(position.X + padding, position.Y + padding / 2), titleColor, FontAlign.Left);
+            // Draw title
+            float availableWidth = width - 5;
+            float titleX;
+
+            if (titleSize.X <= availableWidth)
+            {
+                titleX = position.X + (width - titleSize.X) / 2;
+            }
+            else
+            {
+                titleX = position.X + 5;
+            }
+
+            Graphics.DrawText(title, new Vector2(titleX, position.Y + padding / 2), titleColor, FontAlign.Left);
+
+            // Draw content
             Graphics.DrawText(content, new Vector2(position.X + padding, position.Y + titleHeight + padding / 2), textColor, FontAlign.Left);
 
             // Draw border
@@ -627,6 +604,36 @@ namespace BetterEssenceCorruptionHelper
         }
     }
 
+    /// <summary>
+    /// Tracks map-wide statistics for essence encounters
+    /// </summary>
+    internal class MapStatistics
+    {
+        public int TotalKilled { get; private set; }
+        public int TotalCorrupted { get; private set; }
+        public int TotalMissed { get; private set; }
+        public int TotalMistakes { get; private set; }
+
+        public void IncrementKilled() => TotalKilled++;
+        public void IncrementCorrupted() => TotalCorrupted++;
+        public void IncrementMissed() => TotalMissed++;
+        public void IncrementMistakes() => TotalMistakes++;
+
+        public void Reset()
+        {
+            TotalKilled = 0;
+            TotalCorrupted = 0;
+            TotalMissed = 0;
+            TotalMistakes = 0;
+        }
+
+        public double SuccessRate => TotalKilled > 0 ? (double)TotalCorrupted / TotalKilled * 100 : 0;
+        public double MissedRate => TotalKilled > 0 ? (double)TotalMissed / TotalKilled * 100 : 0;
+    }
+
+    /// <summary>
+    /// Represents data for a single essence monolith entity
+    /// </summary>
     internal class EssenceEntityData
     {
         public long Address { get; set; }
@@ -639,7 +646,14 @@ namespace BetterEssenceCorruptionHelper
         public EssenceState State { get; set; } = EssenceState.None;
         public EssenceState PreviousState { get; set; } = EssenceState.None;
         public Vector3? LastKnownPosition { get; set; }
+
         public bool WasCorruptedByPlayer { get; set; } = false;
+        public bool WasKilled { get; set; } = false;
+        public bool MissedCorruption { get; set; } = false;
+        public bool MistakenCorruption { get; set; } = false;
+
+        public bool IsSuccessfulCorruption => WasCorruptedByPlayer && PreviousState == EssenceState.ShouldCorrupt;
+        public bool ShouldHaveBeenCorrupted => PreviousState == EssenceState.ShouldCorrupt && !WasCorruptedByPlayer;
     }
 
     internal enum EssenceState
