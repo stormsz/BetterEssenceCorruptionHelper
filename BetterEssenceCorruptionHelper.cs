@@ -2,7 +2,9 @@
 using ExileCore.PoEMemory.Components;
 using ExileCore.PoEMemory.Elements;
 using ExileCore.PoEMemory.MemoryObjects;
+using ExileCore.Shared;
 using ExileCore.Shared.Enums;
+using System.Collections;
 using SharpDX;
 using System.Text;
 using Vector2 = System.Numerics.Vector2;
@@ -13,22 +15,54 @@ namespace BetterEssenceCorruptionHelper
     public class BetterEssenceCorruptionHelper : BaseSettingsPlugin<Settings>
     {
         private readonly Dictionary<long, EssenceEntityData> _trackedEntities = [];
-        private readonly List<EssenceEntityData> _completedEssences = [];
+        private readonly CircularBuffer<EssenceEntityData> _completedEssences;
         private int _entityIdCounter = 0;
 
         private readonly MapStatistics _mapStats = new();
 
         private string _cachedSessionStatsText = "";
-        private DateTime _lastStatsUpdate = DateTime.MinValue;
         private float _cachedWindowWidth = 0f;
         private int _screenWidth = 0;
         private int _screenHeight = 0;
 
         private bool AnyDebugEnabled => Settings.Debug.ShowDebugInfo.Value;
 
+        // Coroutines - make them nullable and initialize in Initialise
+        private Coroutine? _statsUpdateCoroutine;
+        private Coroutine? _entityProcessingCoroutine;
+        private Coroutine? _uiUpdateCoroutine;
+
+        // Wait objects
+        private readonly WaitTime _statsUpdateWait = new(1000); // 1 second
+        private readonly WaitTime _entityProcessWait = new(16); // ~60 FPS
+        private readonly WaitRender _uiUpdateWait = new(2); // Every 2 frames
+
+        private readonly Runner _pluginRunner = new("BetterEssenceCorruptionHelper");
+
+        public BetterEssenceCorruptionHelper()
+        {
+            _completedEssences = new CircularBuffer<EssenceEntityData>(100);
+        }
+
         public override bool Initialise()
         {
             Name = "Better Essence Corruption Helper";
+
+            // Create coroutines
+            _statsUpdateCoroutine = new Coroutine(StatsUpdateRoutine(), this, "StatsUpdate");
+            _entityProcessingCoroutine = new Coroutine(EntityProcessingRoutine(), this, "EntityProcessing");
+            _uiUpdateCoroutine = new Coroutine(UIUpdateRoutine(), this, "UIUpdate");
+
+            // Set priorities
+            _entityProcessingCoroutine.Priority = CoroutinePriority.Critical;
+            _uiUpdateCoroutine.Priority = CoroutinePriority.High;
+            _statsUpdateCoroutine.Priority = CoroutinePriority.Normal;
+
+            // Add coroutines to runner
+            _pluginRunner.Run(_statsUpdateCoroutine);
+            _pluginRunner.Run(_entityProcessingCoroutine);
+            _pluginRunner.Run(_uiUpdateCoroutine);
+
             DebugWindow.LogMsg($"{Name} initialized", 2, Color.Green);
             return base.Initialise();
         }
@@ -45,57 +79,119 @@ namespace BetterEssenceCorruptionHelper
 
         public override Job? Tick()
         {
-            if (!Settings.Enable.Value || !GameController.InGame || GameController.Area.CurrentArea.IsPeaceful)
-                return null;
-
-            if (IsAnyGameUIVisible())
-                return null;
-
-            ProcessEssences();
-
-            // Update cached stats text every second
-            if (DateTime.Now - _lastStatsUpdate >= TimeSpan.FromSeconds(1))
-            {
-                UpdateSessionStatsCache();
-            }
-
+            _pluginRunner.Update();
             return null;
+        }
+
+        #region Coroutines
+
+        private IEnumerator StatsUpdateRoutine()
+        {
+            while (true)
+            {
+                yield return _statsUpdateWait;
+
+                if (ShouldProcess())
+                {
+                    UpdateSessionStatsCache();
+                }
+            }
+        }
+
+        private IEnumerator EntityProcessingRoutine()
+        {
+            while (true)
+            {
+                yield return _entityProcessWait;
+
+                if (ShouldProcess())
+                {
+                    ProcessEssences();
+                }
+            }
+        }
+
+        private IEnumerator UIUpdateRoutine()
+        {
+            while (true)
+            {
+                yield return _uiUpdateWait;
+
+                if (ShouldProcess())
+                {
+                    UpdateEntityLabels();
+                }
+            }
+        }
+
+        #endregion
+
+        private bool ShouldProcess()
+        {
+            return Settings.Enable.Value &&
+                   GameController.InGame &&
+                   !GameController.Area.CurrentArea.IsPeaceful &&
+                   !IsAnyGameUIVisible();
+        }
+
+        private void UpdateEntityLabels()
+        {
+            foreach (var data in _trackedEntities.Values)
+            {
+                if (data.Label == null && data.Entity != null)
+                {
+                    data.Label = FindLabelForEntity(data.Entity);
+                }
+            }
         }
 
         private void ProcessEssences()
         {
             var currentMonoliths = new HashSet<long>();
 
-            foreach (var entity in GameController.Entities)
+            try
             {
-                if (!IsValidMonolith(entity)) continue;
-
-                currentMonoliths.Add(entity.Address);
-
-                if (!_trackedEntities.TryGetValue(entity.Address, out var data))
+                var entities = GameController.Entities;
+                foreach (var entity in entities)
                 {
-                    data = new EssenceEntityData
+                    if (!IsValidMonolith(entity)) continue;
+
+                    currentMonoliths.Add(entity.Address);
+
+                    if (!_trackedEntities.TryGetValue(entity.Address, out var data))
                     {
-                        EntityId = ++_entityIdCounter,
-                        Address = entity.Address,
-                        FirstSeenAddress = entity.Address,
-                        Entity = entity
-                    };
-                    _trackedEntities[entity.Address] = data;
-                }
-                else
-                {
-                    data.Entity = entity;
+                        data = new EssenceEntityData
+                        {
+                            EntityId = ++_entityIdCounter,
+                            Address = entity.Address,
+                            FirstSeenAddress = entity.Address,
+                            Entity = entity,
+                            Label = FindLabelForEntity(entity)
+                        };
+                        _trackedEntities[entity.Address] = data;
+                    }
+                    else
+                    {
+                        data.Entity = entity;
+                    }
+
+                    if (data.Label != null)
+                    {
+                        UpdateEntityData(entity, data);
+                    }
+
+                    // Update position
+                    var pos = entity.PosNum;
+                    data.LastKnownPosition = new Vector3(pos.X, pos.Y, pos.Z);
                 }
 
-                UpdateEntityData(entity, data);
-
-                // Update position
-                var pos = entity.PosNum;
-                data.LastKnownPosition = new Vector3(pos.X, pos.Y, pos.Z);
+                CleanupOldEssences(currentMonoliths);
             }
-
-            CleanupOldEssences(currentMonoliths);
+            catch (Exception ex)
+            {
+                if (AnyDebugEnabled)
+                    DebugWindow.LogError($"ProcessEssences failed: {ex.Message}");
+            }
         }
 
         private void CleanupOldEssences(HashSet<long> currentMonoliths)
@@ -127,7 +223,7 @@ namespace BetterEssenceCorruptionHelper
                     }
                 }
 
-                _completedEssences.Add(data);
+                _completedEssences.PushBack(data);
                 removedEntities.Add(address);
             }
 
@@ -157,15 +253,9 @@ namespace BetterEssenceCorruptionHelper
 
         private void UpdateEntityData(Entity entity, EssenceEntityData data)
         {
-            var label = FindLabelForEntity(entity);
-            if (label == null)
-            {
-                data.Label = null;
-                return;
-            }
+            if (data.Label == null) return;
 
-            data.Label = label;
-            var newAnalysis = EssenceLabelAnalyzer.Analyze(label);
+            var newAnalysis = EssenceLabelAnalyzer.Analyze(data.Label);
             var oldState = data.State;
             var wasCorruptedBefore = data.Analysis.IsCorrupted;
 
@@ -227,12 +317,6 @@ namespace BetterEssenceCorruptionHelper
         {
             if (!Settings.Enable.Value || !GameController.InGame || IsAnyGameUIVisible())
                 return;
-
-            foreach (var data in _trackedEntities.Values)
-            {
-                if (data.Label == null && data.Entity != null)
-                    data.Label = FindLabelForEntity(data.Entity);
-            }
 
             // Draw visuals for essences
             if (Settings.Indicators.EnableAllIndicators.Value)
@@ -320,7 +404,6 @@ namespace BetterEssenceCorruptionHelper
             sb.AppendLine($"  Mistakes: {_mapStats.TotalMistakes}");
 
             _cachedSessionStatsText = sb.ToString();
-            _lastStatsUpdate = DateTime.Now;
             _cachedWindowWidth = CalculateMapStatsWindowWidth(_cachedSessionStatsText);
         }
 
