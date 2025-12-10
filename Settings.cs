@@ -2,7 +2,6 @@
 using ExileCore.Shared.Interfaces;
 using ExileCore.Shared.Nodes;
 using SharpDX;
-using System.Collections.Generic;
 
 namespace BetterEssenceCorruptionHelper
 {
