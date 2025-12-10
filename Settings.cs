@@ -29,7 +29,6 @@ namespace BetterEssenceCorruptionHelper
         public DebugSettings Debug { get; set; }
     }
 
-
     [Submenu(CollapsedByDefault = false)]
     public class IndicatorSettings
     {
@@ -55,14 +54,11 @@ namespace BetterEssenceCorruptionHelper
         [Menu("Draw Text", "Show 'CORRUPT' text above corrupt-me essences")]
         public ToggleNode DrawText { get; set; } = new ToggleNode(true);
 
-        [Menu("Border Thickness", "How thick the border should be")]
-        public RangeNode<float> BorderThickness { get; set; } = new RangeNode<float>(3f, 1f, 10f);
+        [Menu("Background Fill", "Fill the status box with background color")]
+        public ToggleNode BackgroundFill { get; set; } = new ToggleNode(false);
 
-        [Menu("Border Margin", "Extra padding around border")]
-        public RangeNode<float> BorderMargin { get; set; } = new RangeNode<float>(45f, 40f, 50f);
-
-        [Menu("Text Size", "Scale of the 'CORRUPT' text")]
-        public RangeNode<float> TextSize { get; set; } = new RangeNode<float>(2f, 0.5f, 5f);
+        [Menu("Background Opacity", "Opacity of the background fill")]
+        public RangeNode<float> BackgroundOpacity { get; set; } = new RangeNode<float>(0.3f, 0f, 1f);
 
         [Menu("Border Color", "Border color for corrupt-me indicator")]
         public ColorNode BorderColor { get; set; } = new ColorNode(Color.Red);
@@ -83,14 +79,11 @@ namespace BetterEssenceCorruptionHelper
         [Menu("Draw Text", "Show 'KILL' text above kill-ready essences")]
         public ToggleNode DrawText { get; set; } = new ToggleNode(true);
 
-        [Menu("Border Thickness", "How thick the border should be")]
-        public RangeNode<float> BorderThickness { get; set; } = new RangeNode<float>(3f, 1f, 10f);
+        [Menu("Background Fill", "Fill the status box with background color")]
+        public ToggleNode BackgroundFill { get; set; } = new ToggleNode(false);
 
-        [Menu("Border Margin", "Extra padding around border")]
-        public RangeNode<float> BorderMargin { get; set; } = new RangeNode<float>(45f, 40f, 50f);
-
-        [Menu("Text Size", "Scale of the 'KILL' text")]
-        public RangeNode<float> TextSize { get; set; } = new RangeNode<float>(2f, 0.5f, 5f);
+        [Menu("Background Opacity", "Opacity of the background fill")]
+        public RangeNode<float> BackgroundOpacity { get; set; } = new RangeNode<float>(0.3f, 0f, 1f);
 
         [Menu("Border Color", "Border color for kill-ready indicator")]
         public ColorNode BorderColor { get; set; } = new ColorNode(Color.Green);
@@ -107,14 +100,6 @@ namespace BetterEssenceCorruptionHelper
 
         [Menu("Show in Town/Hideout", "Display stats window even in town or hideout")]
         public ToggleNode ShowInTownHideout { get; set; } = new ToggleNode(false);
-        [Menu("Window Anchor", "Which side of the screen to anchor the window to")]
-        public ListNode WindowAnchor { get; set; } = new ListNode { Value = "Top Right", Values = ["Top Left", "Top Right"] };
-
-        [Menu("Offset from Edge X", "Horizontal offset from anchor point")]
-        public RangeNode<int> OffsetX { get; set; } = new RangeNode<int>(20, 0, 500);
-
-        [Menu("Offset from Edge Y", "Vertical offset from anchor point")]
-        public RangeNode<int> OffsetY { get; set; } = new RangeNode<int>(620, 0, 1000);
 
         [Menu("Title Background", "Background color for window title")]
         public ColorNode TitleBackground { get; set; } = new ColorNode(new Color(0, 157, 255, 200));
