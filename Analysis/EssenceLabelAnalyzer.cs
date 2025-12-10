@@ -9,12 +9,7 @@ namespace BetterEssenceCorruptionHelper.Analysis
     /// Parses the label hierarchy to:
     /// - Identify essence types and tiers
     /// - Detect corruption status
-    /// - Apply value heuristics (MEDS patterns, count thresholds)
-    /// 
-    /// Performance considerations:
-    /// - Uses string.Contains for fast matching (essence names are short)
-    /// - Early exit on corruption detection
-    /// - Array lookups for known essence types
+    /// - Apply value heuristics (MEDS patterns, count thresholds
     /// </summary>
     internal static class EssenceLabelAnalyzer
     {
@@ -164,8 +159,7 @@ namespace BetterEssenceCorruptionHelper.Analysis
         /// 1. Contains MEDS essences (always corrupt)
         /// 2. Has 6+ total essences (high value cluster)
         /// 3. Contains valuable result essences (already good outcomes)
-        /// 
-        /// These rules match common PoE essence farming strategies.
+
         /// </summary>
         /// <param name="result">Analysis to evaluate and update</param>
         private static void DetermineValuablePatterns(ref EssenceAnalysis result)

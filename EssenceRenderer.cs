@@ -13,8 +13,7 @@ using Vector2 = System.Numerics.Vector2;
 namespace BetterEssenceCorruptionHelper
 {
     /// <summary>
-    /// Handles all rendering and ImGui drawing for the plugin.
-    /// Separates rendering logic from game logic for better maintainability.
+    /// Handles all rendering and ImGui drawing
     /// </summary>
     /// <remarks>
     /// Initializes a new instance of the EssenceRenderer class.
@@ -322,7 +321,7 @@ namespace BetterEssenceCorruptionHelper
         }
 
         /// <summary>
-        /// Draws map statistics window using ImGui.
+        /// Draws map statistics window
         /// </summary>
         private void DrawMapStatsWindow()
         {
