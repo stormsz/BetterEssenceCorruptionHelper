@@ -398,3 +398,7 @@ FodyWeavers.xsd
 *.sln.iml
 .editorconfig
 .editorconfig
+
+# Local debug/build artifacts (not project source)
+Errors.txt
+tags_backup.txt

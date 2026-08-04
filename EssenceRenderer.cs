@@ -79,7 +79,8 @@ namespace BetterEssenceCorruptionHelper
         /// </summary>
         public void Render()
         {
-            if (!ShouldRender())
+	// If not enabled, not intgame or any big ingame windows are open then we dont render
+            if (!(_settings.Enable.Value && _gameController.InGame && !IsAnyGameUIVisible()));
                 return;
 
             DrawEssenceIndicators();
@@ -89,17 +90,9 @@ namespace BetterEssenceCorruptionHelper
         #endregion
 
         #region Rendering
-
+	///
         /// <summary>
-        /// Determines if we should render indicators this frame.
-        /// </summary>
-        private bool ShouldRender() =>
-            _settings.Enable.Value &&
-            _gameController.InGame &&
-            !IsAnyGameUIVisible();
-
-        /// <summary>
-        /// Checks if any game UI panel is open.
+        /// returns true if any game UI panel is open.
         /// </summary>
         private bool IsAnyGameUIVisible()
         {
@@ -197,6 +190,7 @@ namespace BetterEssenceCorruptionHelper
                     (byte)0,
                     (byte)0,
                     (byte)(_settings.Indicators.CorruptMe.BackgroundOpacity.Value * 255)));
+
                 drawList.AddRectFilled(min, max, ImGui.GetColorU32(fillColor));
             }
             else if (!isCorruptTarget && _settings.Indicators.KillReady.BackgroundFill.Value)
@@ -206,6 +200,7 @@ namespace BetterEssenceCorruptionHelper
                     (byte)255,
                     (byte)0,
                     (byte)(_settings.Indicators.KillReady.BackgroundOpacity.Value * 255)));
+//
                 drawList.AddRectFilled(min, max, ImGui.GetColorU32(fillColor));
             }
 

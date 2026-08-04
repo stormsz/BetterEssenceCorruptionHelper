@@ -7,20 +7,11 @@ using System.Collections.Concurrent;
 
 namespace BetterEssenceCorruptionHelper
 {
-    /// <summary>
-    /// ExileCore plugin that analyzes essence monoliths and provides visual indicators
-    /// to help players decide whether to corrupt or kill essences based on their value.
-    /// 
-    /// Performance optimizations:
-    /// - Uses separated concerns for better maintainability
-    /// - Entity tracking and rendering in separate classes
-    /// - Parallel coroutines for background processing
-    /// </summary>
     public class BetterEssenceCorruptionHelper : BaseSettingsPlugin<Settings>
     {
         #region Constants
 
-        /// <summary>Update interval for statistics cache (milliseconds)</summary>
+        /// Update interval for statistics cache (milliseconds)
         private const int STATS_UPDATE_MS = 1000;
 
         #endregion
@@ -31,7 +22,7 @@ namespace BetterEssenceCorruptionHelper
         private EssenceEntityTracker? _entityTracker;
         private EssenceRenderer? _renderer;
 
-        // Coroutine wait conditions
+        // Coroutine wait condition
         private readonly WaitTime _statsUpdateWait = new(STATS_UPDATE_MS);
 
         // Coroutine instances
@@ -122,7 +113,9 @@ namespace BetterEssenceCorruptionHelper
         /// <param name="area">The new area instance object</param>
         public override void AreaChange(AreaInstance area)
         {
-            ResetState();
+            _entityTracker?.ResetState();
+            _mapStats.Reset();
+            _renderer?.UpdateSessionStatsCache();
         }
 
         /// <summary>
@@ -134,7 +127,7 @@ namespace BetterEssenceCorruptionHelper
             _mapStats.Reset();
             _renderer?.UpdateSessionStatsCache();
         }
-
+        
         /// <summary>
         /// ExileCore tick hook - called every frame.
         /// </summary>
