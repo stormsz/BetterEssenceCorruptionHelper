@@ -36,6 +36,18 @@ namespace BetterEssenceCorruptionHelper
         /// <summary>Processing interval for entity scanning and state updates (milliseconds)</summary>
         private const int ENTITY_PROCESS_MS = 50;
 
+        /// <summary>
+        /// How long an essence must be continuously absent from the entity list before we accept
+        /// that it was actually killed/opened.
+        ///
+        /// GameController.Entities is rebuilt in the background (ExileCore's
+        /// ParseEntitiesInMultiThread), so a still-present essence can vanish from a single pass.
+        /// Treating that as a kill dropped the tracking entry, which then came back as a brand new
+        /// essence with a fresh ID - the counter climbing while stood still - and inflated the
+        /// killed/missed statistics every time it happened.
+        /// </summary>
+        private const int MISSING_GRACE_MS = 750;
+
         #endregion
 
         #region Fields
@@ -60,12 +72,26 @@ namespace BetterEssenceCorruptionHelper
         // Coroutine wait condition
         private readonly WaitTime _entityProcessWait = new(ENTITY_PROCESS_MS);
 
+        /// <summary>Monotonic clock used to age out essences that vanish from the entity list.</summary>
+        private readonly System.Diagnostics.Stopwatch _clock = System.Diagnostics.Stopwatch.StartNew();
+
         #endregion
 
         #region Properties
 
-        /// <summary>Gets a snapshot of currently tracked entities</summary>
-        public IEnumerable<EssenceEntityData> TrackedEntities => _trackedEntities.Values;
+        /// <summary>
+        /// Enumerates currently tracked entities. Deliberately not `.Values`, which copies the
+        /// whole collection into a new list on every access - this runs once per rendered frame.
+        /// ConcurrentDictionary's enumerator is safe against concurrent writes.
+        /// </summary>
+        public IEnumerable<EssenceEntityData> TrackedEntities
+        {
+            get
+            {
+                foreach (var kvp in _trackedEntities)
+                    yield return kvp.Value;
+            }
+        }
 
         #endregion
         #region Initialization
@@ -95,11 +121,45 @@ namespace BetterEssenceCorruptionHelper
         /// </summary>
         public void UpdateEntityLabels()
         {
+            if (_trackedEntities.IsEmpty)
+                return;
+
+            // Read the visible-label list once for the whole pass. Each access re-reads game
+            // memory, so resolving it per tracked essence multiplied that cost by the number of
+            // essences on screen.
+            var labels = _gameController.IngameState.IngameUi.ItemsOnGroundLabelsVisible;
+            if (labels == null)
+                return;
+
             foreach (var kvp in _trackedEntities)
             {
                 var data = kvp.Value;
-                data.Label ??= FindLabelForEntity(data.Entity!);
+                var entity = data.Entity;
+                if (entity == null)
+                    continue;
+
+                // Re-resolve rather than `??=`. A LabelOnGround that has dropped out of
+                // ItemsOnGroundLabelsVisible keeps serving its last known rect, so caching the
+                // first one we ever saw leaves stale boxes drifting on screen until the essence
+                // is finally far enough away to be cleaned up.
+                data.Label = FindLabelIn(labels, entity.Address);
             }
+        }
+
+        /// <summary>
+        /// Matches a ground label to an entity address within an already-materialised label list.
+        /// Hand-rolled loop rather than LINQ to avoid a closure allocation per essence per pass.
+        /// </summary>
+        private static LabelOnGround? FindLabelIn(IList<LabelOnGround> labels, long address)
+        {
+            for (var i = 0; i < labels.Count; i++)
+            {
+                var label = labels[i];
+                if (label?.ItemOnGround?.Address == address)
+                    return label;
+            }
+
+            return null;
         }
 
         /// <summary>
@@ -134,6 +194,9 @@ namespace BetterEssenceCorruptionHelper
                     // Get or create tracking data for this essence
                     var data = GetOrCreateEntityData(entity, currentMonoliths);
                     currentMonoliths.Add(entity.Address);
+
+                    // Present again - cancel any in-flight "missing" grace period.
+                    data.MissingSinceMs = null;
 
                     // Update state if label is available
                     if (data.Label != null)
@@ -234,7 +297,6 @@ namespace BetterEssenceCorruptionHelper
             {
                 EntityId = newId,
                 Address = entity.Address,
-                FirstSeenAddress = entity.Address,
                 Entity = entity,
                 Label = FindLabelForEntity(entity)
             };
@@ -267,10 +329,7 @@ namespace BetterEssenceCorruptionHelper
 
             // Track state transitions for debugging
             if (HasStateChanged(wasCorruptedBefore, newAnalysis.IsCorrupted, oldState, newState))
-            {
-                data.PreviousState = oldState;
                 DebugWindow.LogMsg($"Essence {data.EntityId}: {oldState} -> {newState}");
-            }
 
             data.State = newState;
         }
@@ -288,7 +347,6 @@ namespace BetterEssenceCorruptionHelper
         {
             data.WasCorruptedByPlayer = true;
             data.PreviousAnalysis = data.Analysis;  // Save pre-corruption state for comparison
-            data.PreviousState = oldState;
 
             if (_settings.Debug.ShowDebugInfo.Value)
             {
@@ -310,7 +368,6 @@ namespace BetterEssenceCorruptionHelper
             else if (oldState == EssenceState.ShouldKill)
             {
                 // Bad corruption - essence wasn't valuable enough to corrupt
-                data.MistakenCorruption = true;
                 _mapStats.IncrementMistakes();
 
                 if (_settings.Debug.ShowDebugInfo.Value)
@@ -350,10 +407,21 @@ namespace BetterEssenceCorruptionHelper
                     // Player moved away - essence unloaded but might reload later
                     // Clear label so it gets refreshed when player returns
                     data.Label = null;
+                    data.MissingSinceMs = null;
                     continue;
                 }
 
-                // Entity disappeared while player was nearby - must have been killed/opened
+                // Missing while the player is nearby. That usually means killed/opened, but the
+                // entity list can also drop an entity for a pass or two while it is rebuilt, so
+                // require the gap to persist before acting on it. Keeping the entry alive during
+                // the grace window is what lets the essence be recognised as the same one (and
+                // keep its ID) when it comes back.
+                var now = _clock.ElapsedMilliseconds;
+                data.MissingSinceMs ??= now;
+
+                if (now - data.MissingSinceMs.Value < MISSING_GRACE_MS)
+                    continue;
+
                 HandleEssenceKilled(data, address);
                 removedEntities.Add(address);
             }
@@ -382,13 +450,11 @@ namespace BetterEssenceCorruptionHelper
         /// </summary>
         private void HandleEssenceKilled(EssenceEntityData data, long address)
         {
-            data.WasKilled = true;
             _mapStats.IncrementKilled();
 
             // Check if player missed a corruption opportunity
             if (IsMissedCorruption(data))
             {
-                data.MissedCorruption = true;
                 _mapStats.IncrementMissed();
                 DebugWindow.LogMsg($"MISSED CORRUPTION: Essence {data.EntityId} (0x{address:X}) should have been corrupted but was killed", 3, SharpDX.Color.Orange);
             }
@@ -450,30 +516,7 @@ namespace BetterEssenceCorruptionHelper
         /// <summary>
         /// Determines if entity processing should run this frame.
         /// </summary>
-        private bool ShouldProcess() =>
-            _settings.Enable.Value &&
-            _gameController.InGame &&
-            !_gameController.Area.CurrentArea.IsPeaceful &&
-            !IsAnyGameUIVisible();
-
-        /// <summary>
-        /// Checks if any game UI panel is open.
-        /// </summary>
-        private bool IsAnyGameUIVisible()
-        {
-            var ui = _gameController.IngameState.IngameUi;
-            return ui.InventoryPanel.IsVisible ||
-                    ui.OpenLeftPanel.IsVisible ||
-                    ui.TreePanel.IsVisible ||
-                    ui.Atlas.IsVisible ||
-                    ui.SyndicatePanel.IsVisible ||
-                    ui.DelveWindow.IsVisible ||
-                    ui.IncursionWindow.IsVisible ||
-                    ui.HeistWindow.IsVisible ||
-                    ui.ExpeditionWindow.IsVisible ||
-                    ui.RitualWindow.IsVisible ||
-                    ui.UltimatumPanel.IsVisible;
-        }
+        private bool ShouldProcess() => GameStateGates.ShouldTrackEssences(_gameController, _settings);
 
         /// <summary>
         /// Converts System.Numerics Vector3 to SharpDX Vector3.

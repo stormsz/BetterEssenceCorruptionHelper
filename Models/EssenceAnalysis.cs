@@ -30,15 +30,6 @@
         /// <summary>Number of Deafening-tier essences (Tier 6)</summary>
         public int DeafeningCount { get; set; }
 
-        /// <summary>Number of Wailing-tier essences (Tier 3)</summary>
-        public int WailingCount { get; set; }
-
-        /// <summary>Number of Weeping-tier essences (Tier 2)</summary>
-        public int WeepingCount { get; set; }
-
-        /// <summary>Number of Muttering-tier essences (Tier 1)</summary>
-        public int MutteringCount { get; set; }
-
         /// <summary>
         /// True if the essence has a valuable pattern worth corrupting.
         /// Determined by: MEDS essences OR 6+ total essences OR valuable result essences.

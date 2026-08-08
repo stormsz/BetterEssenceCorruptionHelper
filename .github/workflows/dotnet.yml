@@ -22,7 +22,9 @@ jobs:
 
     - uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: 8.0.x
+        # Must cover the csproj's TargetFramework (net10.0-windows since the ExileApi 329.x /
+        # PoE 3.29 update). An older SDK here fails the build outright.
+        dotnet-version: 10.0.x
 
     - name: Download ExileCore dependencies
       run: |
@@ -36,7 +38,8 @@ jobs:
     - name: Create plugin folder
       run: |
         mkdir -p release/${{ env.PLUGIN_NAME }}
-        cp bin/Release/net8.0-windows/${{ env.PLUGIN_NAME }}.dll release/${{ env.PLUGIN_NAME }}/
+        # Glob the TFM so a future retarget doesn't silently break packaging.
+        cp bin/Release/*/${{ env.PLUGIN_NAME }}.dll release/${{ env.PLUGIN_NAME }}/
 
     - name: Zip plugin
       run: |

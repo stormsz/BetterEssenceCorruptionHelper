@@ -34,6 +34,12 @@ namespace BetterEssenceCorruptionHelper
         [Menu("Enable All Indicators", "Master toggle for all essence indicators")]
         public ToggleNode EnableAllIndicators { get; set; } = new ToggleNode(true);
 
+        [Menu("Box Inset X", "Pixels to inset the indicator box horizontally from each side of the ground label. 0 = match the label exactly.")]
+        public RangeNode<int> BoxInsetX { get; set; } = new RangeNode<int>(0, -60, 60);
+
+        [Menu("Box Inset Y", "Pixels to inset the indicator box vertically from the top and bottom of the ground label. 0 = match the label exactly.")]
+        public RangeNode<int> BoxInsetY { get; set; } = new RangeNode<int>(0, -60, 60);
+
         [Menu("Corrupt-Me Indicator", 100)]
         public CorruptMeSettings CorruptMe { get; set; } = new CorruptMeSettings();
 
@@ -41,9 +47,33 @@ namespace BetterEssenceCorruptionHelper
         public KillReadySettings KillReady { get; set; } = new KillReadySettings();
     }
 
-    [Submenu]
-    public class CorruptMeSettings
+    /// <summary>
+    /// Common shape of the two indicator setting blocks, so the renderer can read them without
+    /// `dynamic` dispatch on a per-essence, per-frame hot path.
+    /// Implemented explicitly so ExileCore's [Menu] reflection/serialization is unaffected.
+    /// </summary>
+    public interface IIndicatorSettings
     {
+        ToggleNode ShowIndicator { get; }
+        ToggleNode DrawBorder { get; }
+        ToggleNode DrawText { get; }
+        ToggleNode BackgroundFill { get; }
+        RangeNode<float> BackgroundOpacity { get; }
+        ColorNode BorderColor { get; }
+        ColorNode TextColor { get; }
+    }
+
+    [Submenu]
+    public class CorruptMeSettings : IIndicatorSettings
+    {
+        ToggleNode IIndicatorSettings.ShowIndicator => ShowCorruptMe;
+        ToggleNode IIndicatorSettings.DrawBorder => DrawBorder;
+        ToggleNode IIndicatorSettings.DrawText => DrawText;
+        ToggleNode IIndicatorSettings.BackgroundFill => BackgroundFill;
+        RangeNode<float> IIndicatorSettings.BackgroundOpacity => BackgroundOpacity;
+        ColorNode IIndicatorSettings.BorderColor => BorderColor;
+        ColorNode IIndicatorSettings.TextColor => TextColor;
+
         [Menu("Enable Corrupt-Me Indicator", "Display indicator for essences that should be corrupted")]
         public ToggleNode ShowCorruptMe { get; set; } = new ToggleNode(true);
 
@@ -67,8 +97,16 @@ namespace BetterEssenceCorruptionHelper
     }
 
     [Submenu]
-    public class KillReadySettings
+    public class KillReadySettings : IIndicatorSettings
     {
+        ToggleNode IIndicatorSettings.ShowIndicator => ShowKillReady;
+        ToggleNode IIndicatorSettings.DrawBorder => DrawBorder;
+        ToggleNode IIndicatorSettings.DrawText => DrawText;
+        ToggleNode IIndicatorSettings.BackgroundFill => BackgroundFill;
+        RangeNode<float> IIndicatorSettings.BackgroundOpacity => BackgroundOpacity;
+        ColorNode IIndicatorSettings.BorderColor => BorderColor;
+        ColorNode IIndicatorSettings.TextColor => TextColor;
+
         [Menu("Enable Kill-Ready Indicator", "Display indicator for essences ready to kill")]
         public ToggleNode ShowKillReady { get; set; } = new ToggleNode(true);
 
