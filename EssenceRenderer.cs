@@ -1,6 +1,7 @@
 ﻿using BetterEssenceCorruptionHelper.Analysis;
 using BetterEssenceCorruptionHelper.Models;
 using ExileCore;
+using ExileCore.PoEMemory;
 using ExileCore.PoEMemory.Elements;
 using ExileCore.Shared;
 using ImGuiNET;
@@ -79,8 +80,8 @@ namespace BetterEssenceCorruptionHelper
         /// </summary>
         public void Render()
         {
-	// If not enabled, not intgame or any big ingame windows are open then we dont render
-            if (!(_settings.Enable.Value && _gameController.InGame && !IsAnyGameUIVisible()));
+            // If not enabled, not ingame, or any big ingame window is open then we dont render
+            if (!GameStateGates.ShouldRender(_gameController, _settings))
                 return;
 
             DrawEssenceIndicators();
@@ -90,25 +91,6 @@ namespace BetterEssenceCorruptionHelper
         #endregion
 
         #region Rendering
-	///
-        /// <summary>
-        /// returns true if any game UI panel is open.
-        /// </summary>
-        private bool IsAnyGameUIVisible()
-        {
-            var ui = _gameController.IngameState.IngameUi;
-            return ui.InventoryPanel.IsVisible ||
-                    ui.OpenLeftPanel.IsVisible ||
-                    ui.TreePanel.IsVisible ||
-                    ui.Atlas.IsVisible ||
-                    ui.SyndicatePanel.IsVisible ||
-                    ui.DelveWindow.IsVisible ||
-                    ui.IncursionWindow.IsVisible ||
-                    ui.HeistWindow.IsVisible ||
-                    ui.ExpeditionWindow.IsVisible ||
-                    ui.RitualWindow.IsVisible ||
-                    ui.UltimatumPanel.IsVisible;
-        }
 
         /// <summary>
         /// Main rendering method - draws all essence indicators and debug windows.
@@ -118,17 +100,98 @@ namespace BetterEssenceCorruptionHelper
             if (!_settings.Indicators.EnableAllIndicators.Value)
                 return;
 
-            // Snapshot to avoid modification during enumeration
-            var snapshot = new List<EssenceEntityData>(_entityTracker.TrackedEntities);
+            // ConcurrentDictionary enumeration is already safe against concurrent writes, so we
+            // iterate directly instead of copying a snapshot list every single frame.
+            var showDebug = _settings.Debug.ShowDebugInfo.Value;
 
-            foreach (var data in snapshot)
+            foreach (var data in _entityTracker.TrackedEntities)
             {
                 DrawEssenceIndicator(data);
 
                 // Draw debug window for this specific essence if enabled
-                if (_settings.Debug.ShowDebugInfo.Value && data.Label?.Label != null)
+                if (showDebug && data.Label?.Label != null)
                     DrawEssenceDebugWindow(data);
             }
+        }
+
+        /// <summary>
+        /// Returns the rectangle covering a ground label's actual visible content.
+        ///
+        /// The label root carries invisible horizontal padding - measured live at 40.5px per side
+        /// on a 529.9px-wide essence label, with zero vertical padding. That padding is what the
+        /// old hardcoded "+40 / -80" was compensating for, but as a constant it broke on narrower
+        /// labels (a 129.6px label became a 49.6px sliver). Taking the union of the non-empty
+        /// direct children measures it instead, so it stays correct at any label width, resolution
+        /// or UI scale.
+        /// </summary>
+        private static RectangleF GetContentRect(Element root)
+        {
+            var children = root.Children;
+            if (children == null || children.Count == 0)
+                return root.GetClientRectCache;
+
+            var found = false;
+            float left = 0, top = 0, right = 0, bottom = 0;
+
+            for (var i = 0; i < children.Count; i++)
+            {
+                var child = children[i];
+                if (child == null)
+                    continue;
+
+                var r = child.GetClientRectCache;
+                if (r.Width <= 0 || r.Height <= 0)
+                    continue; // Spacer/anchor children report a zero-size rect - ignore them.
+
+                if (!found)
+                {
+                    left = r.Left; top = r.Top; right = r.Right; bottom = r.Bottom;
+                    found = true;
+                    continue;
+                }
+
+                if (r.Left < left) left = r.Left;
+                if (r.Top < top) top = r.Top;
+                if (r.Right > right) right = r.Right;
+                if (r.Bottom > bottom) bottom = r.Bottom;
+            }
+
+            return found
+                ? new RectangleF(left, top, right - left, bottom - top)
+                : root.GetClientRectCache;
+        }
+
+        /// <summary>
+        /// Resolves the on-screen rectangle to draw for an essence, or null when nothing should
+        /// be drawn this frame.
+        ///
+        /// Ground labels drop out of ItemsOnGroundLabelsVisible long before the essence is far
+        /// enough away for the tracker to clear it, and a label that is no longer visible keeps
+        /// returning its last rect - which is how stale boxes end up drifting around the screen.
+        /// Requiring IsVisible plus an on-screen test kills that.
+        /// </summary>
+        private RectangleF? GetDrawRect(EssenceEntityData data)
+        {
+            var label = data.Label;
+            if (label == null || !label.IsVisible || label.Label == null)
+                return null;
+
+            var rect = GetContentRect(label.Label);
+            if (rect.Width <= 0 || rect.Height <= 0)
+                return null;
+
+            var window = _gameController.Window.GetWindowRectangleTimeCache;
+            if (rect.Right < 0 || rect.Bottom < 0 || rect.Left > window.Width || rect.Top > window.Height)
+                return null;
+
+            var insetX = _settings.Indicators.BoxInsetX.Value;
+            var insetY = _settings.Indicators.BoxInsetY.Value;
+
+            return new RectangleF(
+                rect.X + insetX,
+                rect.Y + insetY,
+                rect.Width - insetX * 2,
+                rect.Height - insetY * 2);
         }
 
         /// <summary>
@@ -136,88 +199,72 @@ namespace BetterEssenceCorruptionHelper
         /// </summary>
         private void DrawEssenceIndicator(EssenceEntityData data)
         {
-            var isCorruptTarget = data.State == EssenceState.ShouldCorrupt;
+            // Read State once - it is written by the entity-processing coroutine, which may be
+            // running on the parallel runner while we render.
+            var state = data.State;
 
-            // Draw corrupt-me indicators (red border/text)
-            if (isCorruptTarget && _settings.Indicators.CorruptMe.ShowCorruptMe.Value)
+            IIndicatorSettings indicator = state switch
             {
-                if (_settings.Indicators.CorruptMe.DrawBorder.Value)
-                    DrawStatusBox(data, true);
-                if (_settings.Indicators.CorruptMe.DrawText.Value)
-                    DrawStatusText(data, true);
-            }
-            // Draw kill-ready indicators (green border/text)
-            else if (data.State == EssenceState.ShouldKill && _settings.Indicators.KillReady.ShowKillReady.Value)
-            {
-                if (_settings.Indicators.KillReady.DrawBorder.Value)
-                    DrawStatusBox(data, false);
-                if (_settings.Indicators.KillReady.DrawText.Value)
-                    DrawStatusText(data, false);
-            }
+                EssenceState.ShouldCorrupt => _settings.Indicators.CorruptMe,
+                EssenceState.ShouldKill => _settings.Indicators.KillReady,
+                _ => null!
+            };
+
+            if (indicator is null || !indicator.ShowIndicator.Value)
+                return;
+
+            if (!indicator.DrawBorder.Value && !indicator.DrawText.Value)
+                return;
+
+            // Resolve geometry once and share it between the box and the text.
+            var rect = GetDrawRect(data);
+            if (rect is not { } drawRect)
+                return;
+
+            var isCorruptTarget = state == EssenceState.ShouldCorrupt;
+
+            if (indicator.DrawBorder.Value)
+                DrawStatusBox(drawRect, indicator, isCorruptTarget);
+
+            if (indicator.DrawText.Value)
+                DrawStatusText(drawRect, indicator, isCorruptTarget);
         }
 
         /// <summary>
         /// Draws colored border box around an essence label using ImGui background draw list.
         /// </summary>
-        private void DrawStatusBox(EssenceEntityData data, bool isCorruptTarget)
+        private void DrawStatusBox(RectangleF rect, IIndicatorSettings indicator, bool isCorruptTarget)
         {
-            if (data.Label?.Label == null)
-                return;
-
-            var rect = data.Label.Label.GetClientRectCache;
-            var indicatorSettings = GetIndicatorSettings(isCorruptTarget);
-
             // Get ImGui background draw list for overlay rendering
             var drawList = ImGui.GetBackgroundDrawList();
 
-            // Calculate border rectangle with margins
-            var borderRect = new RectangleF(
-                rect.X + 40,
-                rect.Y,
-                rect.Width - 80,
-                rect.Height
-            );
+            var min = new Vector2(rect.X, rect.Y);
+            var max = new Vector2(rect.Right, rect.Bottom);
 
-            var borderColor = ToImguiVec4(indicatorSettings.BorderColor);
-            var min = new Vector2(borderRect.X, borderRect.Y);
-            var max = new Vector2(borderRect.Right, borderRect.Bottom);
-
-            // Draw optional background fill
-            if (isCorruptTarget && _settings.Indicators.CorruptMe.BackgroundFill.Value)
+            // Draw optional background fill, tinted to match the indicator's own border colour
+            // rather than a hardcoded pure red/green.
+            if (indicator.BackgroundFill.Value)
             {
+                var baseColor = indicator.BorderColor.Value;
                 var fillColor = ToImguiVec4(new SharpDX.Color(
-                    (byte)255,
-                    (byte)0,
-                    (byte)0,
-                    (byte)(_settings.Indicators.CorruptMe.BackgroundOpacity.Value * 255)));
+                    baseColor.R,
+                    baseColor.G,
+                    baseColor.B,
+                    (byte)(indicator.BackgroundOpacity.Value * 255)));
 
-                drawList.AddRectFilled(min, max, ImGui.GetColorU32(fillColor));
-            }
-            else if (!isCorruptTarget && _settings.Indicators.KillReady.BackgroundFill.Value)
-            {
-                var fillColor = ToImguiVec4(new SharpDX.Color(
-                    (byte)0,
-                    (byte)255,
-                    (byte)0,
-                    (byte)(_settings.Indicators.KillReady.BackgroundOpacity.Value * 255)));
-//
                 drawList.AddRectFilled(min, max, ImGui.GetColorU32(fillColor));
             }
 
             // Draw border (2px thick for visibility)
+            var borderColor = ToImguiVec4(indicator.BorderColor.Value);
             drawList.AddRect(min, max, ImGui.GetColorU32(borderColor), 0.0f, ImDrawFlags.None, 2.0f);
         }
 
         /// <summary>
         /// Draws "CORRUPT" or "KILL" text above essence label.
         /// </summary>
-        private void DrawStatusText(EssenceEntityData data, bool isCorruptTarget)
+        private void DrawStatusText(RectangleF rect, IIndicatorSettings indicator, bool isCorruptTarget)
         {
-            if (data.Label?.Label == null)
-                return;
-
-            var rect = data.Label.Label.GetClientRectCache;
-            var indicatorSettings = GetIndicatorSettings(isCorruptTarget);
             var text = isCorruptTarget ? "CORRUPT" : "KILL";
 
             // Position text 25 pixels above the essence label
@@ -237,7 +284,7 @@ namespace BetterEssenceCorruptionHelper
             drawList.AddRectFilled(bgMin, bgMax, ImGui.GetColorU32(bgColor), 0f);
 
             // Draw centered text
-            var textColor = ToImguiVec4(indicatorSettings.TextColor);
+            var textColor = ToImguiVec4(indicator.TextColor.Value);
             var textDrawPos = new Vector2(textPos.X - textSize.X / 2, textPos.Y);
             drawList.AddText(textDrawPos, ImGui.GetColorU32(textColor), text);
         }
@@ -290,7 +337,9 @@ namespace BetterEssenceCorruptionHelper
             ImGui.SetNextWindowPos(debugWindowPos);
             ImGui.SetNextWindowSize(windowSize);
 
-            // Begin unique window for THIS essence
+            // Begin unique window for THIS essence.
+            // ImGui requires End() for every Begin() regardless of the return value - only the
+            // body is conditional. Skipping it corrupts the window stack.
             if (ImGui.Begin(windowName, windowFlags))
             {
                 // Draw each line of debug information
@@ -307,9 +356,9 @@ namespace BetterEssenceCorruptionHelper
                         ImGui.TextColored(ToImguiVec4(color), text);
                     }
                 }
-
-                ImGui.End();
             }
+
+            ImGui.End();
 
             ImGui.PopStyleVar();
             ImGui.PopStyleColor(2);
@@ -331,7 +380,8 @@ namespace BetterEssenceCorruptionHelper
             ImGui.PushStyleColor(ImGuiCol.Border, ToImguiVec4(_settings.MapStats.BorderColor.Value));
             ImGui.PushStyleColor(ImGuiCol.Text, ToImguiVec4(_settings.MapStats.TitleColor.Value));
 
-            // Begin window
+            // Begin window. As above, End() is unconditional - only the body is gated on the
+            // return value (false means collapsed/clipped, not "no window was pushed").
             if (ImGui.Begin("Essence Map Stats"))
             {
                 var statColor = ToImguiVec4(_settings.MapStats.TextColor.Value);
@@ -344,9 +394,9 @@ namespace BetterEssenceCorruptionHelper
                 ImGui.TextColored(statColor, $"  Corrupted: {_mapStats.TotalCorrupted}");
                 ImGui.TextColored(statColor, $"  Missed: {_mapStats.TotalMissed}");
                 ImGui.TextColored(statColor, $"  Mistakes: {_mapStats.TotalMistakes}");
-
-                ImGui.End();
             }
+
+            ImGui.End();
 
             ImGui.PopStyleColor(5);
         }
@@ -356,29 +406,9 @@ namespace BetterEssenceCorruptionHelper
         #region Helpers
 
         /// <summary>
-        /// Gets indicator settings based on essence state.
+        /// Determines if label refreshing should run this frame.
         /// </summary>
-        private EssenceIndicatorSettings GetIndicatorSettings(bool isCorruptTarget)
-        {
-            dynamic settings = isCorruptTarget
-                ? _settings.Indicators.CorruptMe
-                : _settings.Indicators.KillReady;
-
-            return new EssenceIndicatorSettings
-            {
-                BorderColor = settings.BorderColor.Value,
-                TextColor = settings.TextColor.Value
-            };
-        }
-
-        /// <summary>
-        /// Determines if entity processing should run this frame.
-        /// </summary>
-        private bool ShouldProcess() =>
-            _settings.Enable.Value &&
-            _gameController.InGame &&
-            !_gameController.Area.CurrentArea.IsPeaceful &&
-            !IsAnyGameUIVisible();
+        private bool ShouldProcess() => GameStateGates.ShouldTrackEssences(_gameController, _settings);
 
         /// <summary>
         /// Builds debug content as list of lines.

@@ -3,7 +3,6 @@ using ExileCore;
 using ExileCore.Shared;
 using ExileCore.Shared.Enums;
 using System.Collections;
-using System.Collections.Concurrent;
 
 namespace BetterEssenceCorruptionHelper
 {
@@ -68,39 +67,28 @@ namespace BetterEssenceCorruptionHelper
             _uiUpdateCoroutine!.Priority = CoroutinePriority.High;
             _statsUpdateCoroutine!.Priority = CoroutinePriority.Normal;
 
-            // Get runner references from ExileCore
-            var parallelRunner = Core.ParallelRunner;
             var mainRunner = Core.MainRunner;
 
-            // Check the user's CoroutineMultiThreading setting
-            bool useParallelMode = GameController.Settings.CoreSettings.PerformanceSettings.CoroutineMultiThreading.Value;
-
-            if (useParallelMode && parallelRunner != null)
-            {
-                // User enabled multi-threading AND parallel runner is available
-                _entityProcessingCoroutine.SyncModWork = false;
-                _statsUpdateCoroutine.SyncModWork = false;
-
-                parallelRunner.Run(_entityProcessingCoroutine);
-                parallelRunner.Run(_statsUpdateCoroutine);
-
-                DebugWindow.LogMsg($"[{Name}]: Parallel mode initialized");
-            }
-            else
-            {
-                // User disabled multi-threading OR parallel runner unavailable
-                _entityProcessingCoroutine.SyncModWork = true;
-                _statsUpdateCoroutine.SyncModWork = true;
-
-                mainRunner?.Run(_entityProcessingCoroutine);
-                mainRunner?.Run(_statsUpdateCoroutine);
-
-                DebugWindow.LogMsg($"[{Name}]: Single-threaded mode initialized");
-            }
-
-            // UI updates MUST run on main thread
+            // Everything runs on the main runner, deliberately.
+            //
+            // Entity processing reads ExileCore memory objects (GameController.Entities, and the
+            // ground-label Element tree via EssenceLabelAnalyzer). Those are backed by per-frame
+            // caches that are not thread-safe, and Render() reads the very same Elements. Running
+            // the scan on Core.ParallelRunner raced the render thread over that shared cache state
+            // for no real benefit - the whole pass is a handful of entities at 20Hz, which is far
+            // too little work to be worth a thread.
+            //
+            // Stats only touch Interlocked counters, but there is nothing to gain by moving them
+            // off the main runner either.
+            _entityProcessingCoroutine.SyncModWork = true;
+            _statsUpdateCoroutine.SyncModWork = true;
             _uiUpdateCoroutine.SyncModWork = true;
+
+            mainRunner?.Run(_entityProcessingCoroutine);
+            mainRunner?.Run(_statsUpdateCoroutine);
             mainRunner?.Run(_uiUpdateCoroutine);
+
+            DebugWindow.LogMsg($"[{Name}]: initialized on main runner");
         }
 
         #endregion
@@ -116,25 +104,6 @@ namespace BetterEssenceCorruptionHelper
             _entityTracker?.ResetState();
             _mapStats.Reset();
             _renderer?.UpdateSessionStatsCache();
-        }
-
-        /// <summary>
-        /// Clears all tracking data when entering a new area.
-        /// </summary>
-        private void ResetState()
-        {
-            _entityTracker?.ResetState();
-            _mapStats.Reset();
-            _renderer?.UpdateSessionStatsCache();
-        }
-        
-        /// <summary>
-        /// ExileCore tick hook - called every frame.
-        /// </summary>
-        /// <returns>null - we don't queue any jobs</returns>
-        public override Job? Tick()
-        {
-            return null;
         }
 
         /// <summary>

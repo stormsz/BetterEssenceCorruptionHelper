@@ -129,19 +129,10 @@ namespace BetterEssenceCorruptionHelper.Analysis
                 result.ScreamingCount++;
                 result.EssenceCount++;
             }
-            else if (text.Contains("Wailing"))
+            // Low tiers are counted toward the total but not tracked individually - nothing reads
+            // a per-tier breakdown below Screaming.
+            else if (text.Contains("Wailing") || text.Contains("Weeping") || text.Contains("Muttering"))
             {
-                result.WailingCount++;
-                result.EssenceCount++;
-            }
-            else if (text.Contains("Weeping"))
-            {
-                result.WeepingCount++;
-                result.EssenceCount++;
-            }
-            else if (text.Contains("Muttering"))
-            {
-                result.MutteringCount++;
                 result.EssenceCount++;
             }
             else if (text.Contains("Essence of") || IsKnownEssenceName(text))

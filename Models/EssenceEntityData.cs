@@ -15,9 +15,6 @@ namespace BetterEssenceCorruptionHelper.Models
         /// <summary>Current entity memory address (changes when essence unloads/reloads)</summary>
         public long Address { get; set; }
 
-        /// <summary>Original address when first discovered (for debugging)</summary>
-        public long FirstSeenAddress { get; set; }
-
         /// <summary>Unique ID assigned by plugin (persists across address changes)</summary>
         public int EntityId { get; set; }
 
@@ -36,22 +33,20 @@ namespace BetterEssenceCorruptionHelper.Models
         /// <summary>Current state (should corrupt, should kill)</summary>
         public EssenceState State { get; set; } = EssenceState.None;
 
-        /// <summary>State before last transition (for debugging)</summary>
-        public EssenceState PreviousState { get; set; } = EssenceState.None;
+        /// <summary>
+        /// Timestamp (tracker clock, ms) of the first pass on which this essence went missing
+        /// from the entity list, or null while it is present. Used to ride out transient gaps
+        /// instead of instantly declaring the essence killed.
+        /// </summary>
+        public long? MissingSinceMs { get; set; }
 
         /// <summary>Last known position (for relinking after unload)</summary>
         public Vector3? LastKnownPosition { get; set; }
 
-        /// <summary>True if player corrupted this essence</summary>
+        /// <summary>
+        /// True if player corrupted this essence. Read by the debug overlay to decide whether to
+        /// show the before/after comparison.
+        /// </summary>
         public bool WasCorruptedByPlayer { get; set; }
-
-        /// <summary>True if essence was killed/opened</summary>
-        public bool WasKilled { get; set; }
-
-        /// <summary>True if valuable essence was killed without corrupting</summary>
-        public bool MissedCorruption { get; set; }
-
-        /// <summary>True if non-valuable essence was corrupted (mistake)</summary>
-        public bool MistakenCorruption { get; set; }
     }
 }
