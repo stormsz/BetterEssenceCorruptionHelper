@@ -16,21 +16,6 @@ namespace BetterEssenceCorruptionHelper.Analysis
         /// <summary>MEDS essences (Misery, Envy, Dread, Scorn) - always valuable for corruption</summary>
         private static readonly string[] MedsEssences = ["Misery", "Envy", "Dread", "Scorn"];
 
-        /// <summary>Valuable result essences from corruption (Horror, Delirium, Hysteria, Insanity)</summary>
-        private static readonly string[] ValuableEssences =
-        [
-            "Horror", "Delirium", "Hysteria", "Insanity"
-        ];
-
-        /// <summary>Complete list of known essence names for validation</summary>
-        private static readonly string[] EssenceNames =
-        [
-            "Anger", "Anguish", "Contempt", "Doubt", "Dread", "Envy", "Fear",
-            "Greed", "Hatred", "Loathing", "Misery", "Rage", "Scorn", "Sorrow",
-            "Spite", "Suffering", "Torment", "Woe", "Wrath", "Zeal",
-            "Horror", "Delirium", "Hysteria", "Insanity"
-        ];
-
         /// <summary>
         /// Analyzes an essence monolith label to extract essence information.
         /// 
@@ -107,12 +92,6 @@ namespace BetterEssenceCorruptionHelper.Analysis
                 result.HasMeds = true;
             }
 
-            // Check for valuable result essences (post-corruption)
-            if (ValuableEssences.Any(valuable => text.Contains(valuable)))
-            {
-                result.HasValuableResult = true;
-            }
-
             // Count by tier (highest to lowest for performance)
             if (text.Contains("Deafening"))
             {
@@ -135,10 +114,11 @@ namespace BetterEssenceCorruptionHelper.Analysis
             {
                 result.EssenceCount++;
             }
-            else if (text.Contains("Essence of") || IsKnownEssenceName(text))
+            else if (text.Contains("Essence of"))
             {
-                // Fallback: count any essence we might have missed
-                // Typically indicates parsing issue or new essence type
+                // Fallback: an essence line with an unlisted tier prefix (e.g. Whispering) or none
+                // at all (the corruption-only essences). Matching on bare essence names here only
+                // ever added false positives from non-essence label lines.
                 result.EssenceCount++;
             }
         }
@@ -149,8 +129,9 @@ namespace BetterEssenceCorruptionHelper.Analysis
         /// Value heuristics (in order of priority):
         /// 1. Contains MEDS essences (always corrupt)
         /// 2. Has 6+ total essences (high value cluster)
-        /// 3. Contains valuable result essences (already good outcomes)
-
+        ///
+        /// There is deliberately no rule for Horror/Delirium/Hysteria/Insanity: they only exist on
+        /// already-corrupted monoliths, which are marked to kill before these rules are consulted.
         /// </summary>
         /// <param name="result">Analysis to evaluate and update</param>
         private static void DetermineValuablePatterns(ref EssenceAnalysis result)
@@ -166,26 +147,7 @@ namespace BetterEssenceCorruptionHelper.Analysis
             if (result.EssenceCount >= 6)
             {
                 result.HasValuablePattern = true;
-                return;
             }
-
-            // RULE 3: Already has valuable results (no need to corrupt but still valuable)
-            if (result.HasValuableResult)
-            {
-                result.HasValuablePattern = true;
-                return;
-            }
-        }
-
-        /// <summary>
-        /// Validates if text contains a known essence name.
-        /// Used as fallback for counting essences when tier parsing fails.
-        /// </summary>
-        /// <param name="text">Text to check</param>
-        /// <returns>True if text contains any known essence name</returns>
-        private static bool IsKnownEssenceName(string text)
-        {
-            return EssenceNames.Any(name => text.Contains(name));
         }
     }
 }

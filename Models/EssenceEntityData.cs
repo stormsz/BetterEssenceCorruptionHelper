@@ -1,27 +1,29 @@
 ﻿using BetterEssenceCorruptionHelper.Analysis;
 using ExileCore.PoEMemory.Elements;
 using ExileCore.PoEMemory.MemoryObjects;
-using SharpDX;
 
 namespace BetterEssenceCorruptionHelper.Models
 {
     /// <summary>
     /// Tracking data for a single essence entity.
-    /// Contains all state needed to track an essence across its lifetime,
-    /// including through unload/reload cycles.
+    /// Keyed by the game's entity ID, which (unlike the memory address) stays the same when an
+    /// essence leaves and re-enters the loaded area, so no relinking is needed.
     /// </summary>
     internal class EssenceEntityData
     {
-        /// <summary>Current entity memory address (changes when essence unloads/reloads)</summary>
+        /// <summary>Game entity ID - the tracking key</summary>
+        public uint Id { get; set; }
+
+        /// <summary>Current entity memory address (used to match ground labels, shown in debug)</summary>
         public long Address { get; set; }
 
-        /// <summary>Unique ID assigned by plugin (persists across address changes)</summary>
+        /// <summary>Sequential display number assigned by plugin (per map)</summary>
         public int EntityId { get; set; }
 
         /// <summary>UI label element showing essence names/tiers</summary>
         public LabelOnGround? Label { get; set; }
 
-        /// <summary>Entity reference (updated when essence reloads)</summary>
+        /// <summary>Entity reference (updated every pass the entity is present)</summary>
         public Entity? Entity { get; set; }
 
         /// <summary>Current analysis of essence value</summary>
@@ -34,14 +36,20 @@ namespace BetterEssenceCorruptionHelper.Models
         public EssenceState State { get; set; } = EssenceState.None;
 
         /// <summary>
-        /// Timestamp (tracker clock, ms) of the first pass on which this essence went missing
-        /// from the entity list, or null while it is present. Used to ride out transient gaps
-        /// instead of instantly declaring the essence killed.
+        /// True once Monolith.IsOpened has been read as false for this essence. A kill is only
+        /// counted on a real closed -> opened transition, so a misread flag can never hide an
+        /// essence that is still waiting to be opened.
         /// </summary>
-        public long? MissingSinceMs { get; set; }
+        public bool WasSeenClosed { get; set; }
 
-        /// <summary>Last known position (for relinking after unload)</summary>
-        public Vector3? LastKnownPosition { get; set; }
+        /// <summary>
+        /// True once the monolith has been opened (monster released). The kill is counted on that
+        /// transition, exactly once.
+        /// </summary>
+        public bool IsOpened { get; set; }
+
+        /// <summary>Last Monolith.OpenStage read from the entity (debug overlay only)</summary>
+        public int OpenStage { get; set; }
 
         /// <summary>
         /// True if player corrupted this essence. Read by the debug overlay to decide whether to

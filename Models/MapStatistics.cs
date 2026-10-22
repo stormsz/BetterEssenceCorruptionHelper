@@ -1,11 +1,9 @@
-﻿using System;
-
-namespace BetterEssenceCorruptionHelper.Models
+﻿namespace BetterEssenceCorruptionHelper.Models
 {
     /// <summary>
-    /// Thread-safe statistics tracker for essence corruption decisions.
-    /// Uses Interlocked operations for atomic increments (safe across parallel threads).
-    /// 
+    /// Statistics tracker for essence corruption decisions, scoped to one map instance.
+    /// Only touched from the main runner and Render, which share a thread, so no locking.
+    ///
     /// Tracks:
     /// - TotalKilled: All essences player interacted with
     /// - TotalCorrupted: Essences successfully corrupted (were valuable)
@@ -14,42 +12,32 @@ namespace BetterEssenceCorruptionHelper.Models
     /// </summary>
     internal class MapStatistics
     {
-        private int _totalKilled;
-        private int _totalCorrupted;
-        private int _totalMissed;
-        private int _totalMistakes;
-
         /// <summary>Total number of essences killed/opened by the player</summary>
-        public int TotalKilled => _totalKilled;
+        public int TotalKilled { get; private set; }
 
         /// <summary>Number of essences that were successfully corrupted (were valuable)</summary>
-        public int TotalCorrupted => _totalCorrupted;
+        public int TotalCorrupted { get; private set; }
 
         /// <summary>Number of valuable essences that were killed without corrupting (missed opportunities)</summary>
-        public int TotalMissed => _totalMissed;
+        public int TotalMissed { get; private set; }
 
         /// <summary>Number of non-valuable essences that were corrupted (wasted corruption attempts)</summary>
-        public int TotalMistakes => _totalMistakes;
+        public int TotalMistakes { get; private set; }
 
-        /// <summary>Thread-safe increment using Interlocked</summary>
-        public void IncrementKilled() => Interlocked.Increment(ref _totalKilled);
+        public void IncrementKilled() => TotalKilled++;
 
-        /// <summary>Thread-safe increment using Interlocked</summary>
-        public void IncrementCorrupted() => Interlocked.Increment(ref _totalCorrupted);
+        public void IncrementCorrupted() => TotalCorrupted++;
 
-        /// <summary>Thread-safe increment using Interlocked</summary>
-        public void IncrementMissed() => Interlocked.Increment(ref _totalMissed);
+        public void IncrementMissed() => TotalMissed++;
 
-        /// <summary>Thread-safe increment using Interlocked</summary>
-        public void IncrementMistakes() => Interlocked.Increment(ref _totalMistakes);
+        public void IncrementMistakes() => TotalMistakes++;
 
-        /// <summary>Thread-safe reset using Interlocked.Exchange</summary>
         public void Reset()
         {
-            Interlocked.Exchange(ref _totalKilled, 0);
-            Interlocked.Exchange(ref _totalCorrupted, 0);
-            Interlocked.Exchange(ref _totalMissed, 0);
-            Interlocked.Exchange(ref _totalMistakes, 0);
+            TotalKilled = 0;
+            TotalCorrupted = 0;
+            TotalMissed = 0;
+            TotalMistakes = 0;
         }
     }
 }

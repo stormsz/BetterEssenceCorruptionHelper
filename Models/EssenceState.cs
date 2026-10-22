@@ -11,7 +11,7 @@
 
         /// <summary>
         /// Essence is valuable and should be corrupted.
-        /// Applies to essences with MEDS patterns, 6+ total essences, or valuable results.
+        /// Applies to essences with MEDS patterns or 6+ total essences.
         /// </summary>
         ShouldCorrupt,
 

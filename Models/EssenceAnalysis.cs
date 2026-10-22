@@ -15,24 +15,21 @@
         /// <summary>True if the essence contains MEDS essences (Misery, Envy, Dread, Scorn)</summary>
         public bool HasMeds { get; set; }
 
-        /// <summary>True if the essence contains valuable result essences (Horror, Delirium, Hysteria, Insanity)</summary>
-        public bool HasValuableResult { get; set; }
-
         /// <summary>Total number of essences in the monolith (sum of all tiers)</summary>
         public int EssenceCount { get; set; }
 
-        /// <summary>Number of Screaming-tier essences (Tier 4)</summary>
+        /// <summary>Number of Screaming-tier essences (tier 5 of 7)</summary>
         public int ScreamingCount { get; set; }
 
-        /// <summary>Number of Shrieking-tier essences (Tier 5)</summary>
+        /// <summary>Number of Shrieking-tier essences (tier 6 of 7)</summary>
         public int ShriekingCount { get; set; }
 
-        /// <summary>Number of Deafening-tier essences (Tier 6)</summary>
+        /// <summary>Number of Deafening-tier essences (tier 7 of 7)</summary>
         public int DeafeningCount { get; set; }
 
         /// <summary>
         /// True if the essence has a valuable pattern worth corrupting.
-        /// Determined by: MEDS essences OR 6+ total essences OR valuable result essences.
+        /// Determined by: MEDS essences OR 6+ total essences.
         /// </summary>
         public bool HasValuablePattern { get; set; }
     }

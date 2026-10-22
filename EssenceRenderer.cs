@@ -8,7 +8,6 @@ using ImGuiNET;
 using SharpDX;
 using System.Collections;
 using System.Collections.Generic;
-using System.Text;
 using Vector2 = System.Numerics.Vector2;
 
 namespace BetterEssenceCorruptionHelper
@@ -35,12 +34,6 @@ namespace BetterEssenceCorruptionHelper
         // Coroutine wait condition
         private readonly WaitRender _uiUpdateWait = new(2); // Every 2 frames
 
-        // Cached string representation of map statistics
-        private string _cachedSessionStatsText = "";
-
-        #endregion
-        #region Initialization
-
         #endregion
 
         #region Public Methods
@@ -58,21 +51,6 @@ namespace BetterEssenceCorruptionHelper
                 if (ShouldProcess())
                     _entityTracker.UpdateEntityLabels();
             }
-        }
-
-        /// <summary>
-        /// Updates cached statistics text.
-        /// </summary>
-        public void UpdateSessionStatsCache()
-        {
-            var sb = new StringBuilder();
-            sb.AppendLine("Map Totals");
-            sb.AppendLine($"  Killed: {_mapStats.TotalKilled}");
-            sb.AppendLine($"  Corrupted: {_mapStats.TotalCorrupted}");
-            sb.AppendLine($"  Missed: {_mapStats.TotalMissed}");
-            sb.AppendLine($"  Mistakes: {_mapStats.TotalMistakes}");
-
-            _cachedSessionStatsText = sb.ToString();
         }
 
         /// <summary>
@@ -100,8 +78,8 @@ namespace BetterEssenceCorruptionHelper
             if (!_settings.Indicators.EnableAllIndicators.Value)
                 return;
 
-            // ConcurrentDictionary enumeration is already safe against concurrent writes, so we
-            // iterate directly instead of copying a snapshot list every single frame.
+            // The tracker is only written by main-runner coroutines, on this same thread, so we
+            // iterate it directly instead of copying a snapshot list every single frame.
             var showDebug = _settings.Debug.ShowDebugInfo.Value;
 
             foreach (var data in _entityTracker.TrackedEntities)
@@ -199,8 +177,6 @@ namespace BetterEssenceCorruptionHelper
         /// </summary>
         private void DrawEssenceIndicator(EssenceEntityData data)
         {
-            // Read State once - it is written by the entity-processing coroutine, which may be
-            // running on the parallel runner while we render.
             var state = data.State;
 
             IIndicatorSettings indicator = state switch
@@ -224,7 +200,7 @@ namespace BetterEssenceCorruptionHelper
             var isCorruptTarget = state == EssenceState.ShouldCorrupt;
 
             if (indicator.DrawBorder.Value)
-                DrawStatusBox(drawRect, indicator, isCorruptTarget);
+                DrawStatusBox(drawRect, indicator);
 
             if (indicator.DrawText.Value)
                 DrawStatusText(drawRect, indicator, isCorruptTarget);
@@ -233,7 +209,7 @@ namespace BetterEssenceCorruptionHelper
         /// <summary>
         /// Draws colored border box around an essence label using ImGui background draw list.
         /// </summary>
-        private void DrawStatusBox(RectangleF rect, IIndicatorSettings indicator, bool isCorruptTarget)
+        private void DrawStatusBox(RectangleF rect, IIndicatorSettings indicator)
         {
             // Get ImGui background draw list for overlay rendering
             var drawList = ImGui.GetBackgroundDrawList();
@@ -418,7 +394,7 @@ namespace BetterEssenceCorruptionHelper
             var lines = new List<List<(string, Color)>>();
 
             AddDebugHeader(lines, data);
-            AddDebugPositionInfo(lines, data);
+            AddDebugEntityInfo(lines, data);
             AddDebugAnalysis(lines, data);
 
             return lines;
@@ -446,17 +422,22 @@ namespace BetterEssenceCorruptionHelper
         }
 
         /// <summary>
-        /// Adds debug info showing entity address and position.
+        /// Adds debug info showing the entity identity and the Monolith open state that drives
+        /// kill tracking, so both can be checked against what happens in game.
         /// </summary>
-        private static void AddDebugPositionInfo(List<List<(string, Color)>> lines, EssenceEntityData data)
+        private static void AddDebugEntityInfo(List<List<(string, Color)>> lines, EssenceEntityData data)
         {
+            lines.Add([("Id: ", Color.White), ($"{data.Id}", Color.LightSkyBlue)]);
             lines.Add([("Addr: ", Color.White), ($"0x{data.Address:X12}", Color.LightSkyBlue)]);
+            lines.Add([
+                ("Opened: ", Color.White),
+                (data.IsOpened ? "Yes" : "No", data.IsOpened ? Color.Yellow : Color.White),
+                ($" (stage {data.OpenStage}, seen closed: {(data.WasSeenClosed ? "yes" : "no")})", Color.Gray)
+            ]);
 
-            if (data.LastKnownPosition.HasValue)
-            {
-                var pos = data.LastKnownPosition.Value;
-                lines.Add([("Pos: ", Color.White), ($"({pos.X:F0}, {pos.Y:F0}, {pos.Z:F0})", Color.LightYellow)]);
-            }
+            var pos = data.Entity?.GridPosNum;
+            if (pos.HasValue)
+                lines.Add([("Grid: ", Color.White), ($"({pos.Value.X:F0}, {pos.Value.Y:F0})", Color.LightYellow)]);
 
             lines.Add([]); // Empty line for spacing
         }

@@ -2,30 +2,21 @@
 using ExileCore;
 using ExileCore.Shared;
 using ExileCore.Shared.Enums;
-using System.Collections;
 
 namespace BetterEssenceCorruptionHelper
 {
     public class BetterEssenceCorruptionHelper : BaseSettingsPlugin<Settings>
     {
-        #region Constants
-
-        /// Update interval for statistics cache (milliseconds)
-        private const int STATS_UPDATE_MS = 1000;
-
-        #endregion
-
         #region Fields
 
         private readonly MapStatistics _mapStats = new();
         private EssenceEntityTracker? _entityTracker;
         private EssenceRenderer? _renderer;
 
-        // Coroutine wait condition
-        private readonly WaitTime _statsUpdateWait = new(STATS_UPDATE_MS);
+        /// <summary>Hash of the map instance the current stats belong to (0 = none yet)</summary>
+        private uint _statsMapHash;
 
         // Coroutine instances
-        private Coroutine? _statsUpdateCoroutine;
         private Coroutine? _entityProcessingCoroutine;
         private Coroutine? _uiUpdateCoroutine;
 
@@ -53,19 +44,17 @@ namespace BetterEssenceCorruptionHelper
 
         /// <summary>
         /// Configures and starts coroutines for background processing.
-        /// Respects the user's CoroutineMultiThreading setting from ExileCore.
         /// </summary>
         private void InitializeCoroutines()
         {
-            // Create coroutine instances
-            _statsUpdateCoroutine = new Coroutine(StatsUpdateRoutine(), this, "BetterEssenceStatsUpdate");
+            // Create coroutine instances. Passing `this` as owner lets ExileCore pause them when
+            // the plugin is disabled and finish them on hot reload.
             _entityProcessingCoroutine = new Coroutine(_entityTracker!.GetEntityProcessingCoroutine(), this, "BetterEssenceEntityProcessing");
             _uiUpdateCoroutine = new Coroutine(_renderer!.GetUIUpdateCoroutine(), this, "BetterEssenceUIUpdate");
 
             // Set execution priorities
-            _entityProcessingCoroutine!.Priority = CoroutinePriority.Critical;
-            _uiUpdateCoroutine!.Priority = CoroutinePriority.High;
-            _statsUpdateCoroutine!.Priority = CoroutinePriority.Normal;
+            _entityProcessingCoroutine.Priority = CoroutinePriority.Critical;
+            _uiUpdateCoroutine.Priority = CoroutinePriority.High;
 
             var mainRunner = Core.MainRunner;
 
@@ -78,14 +67,12 @@ namespace BetterEssenceCorruptionHelper
             // for no real benefit - the whole pass is a handful of entities at 20Hz, which is far
             // too little work to be worth a thread.
             //
-            // Stats only touch Interlocked counters, but there is nothing to gain by moving them
-            // off the main runner either.
+            // SyncModWork keeps them on this thread even when ExileCore's CoroutineMultiThreading
+            // option is on, which is also why the tracker can use plain collections.
             _entityProcessingCoroutine.SyncModWork = true;
-            _statsUpdateCoroutine.SyncModWork = true;
             _uiUpdateCoroutine.SyncModWork = true;
 
             mainRunner?.Run(_entityProcessingCoroutine);
-            mainRunner?.Run(_statsUpdateCoroutine);
             mainRunner?.Run(_uiUpdateCoroutine);
 
             DebugWindow.LogMsg($"[{Name}]: initialized on main runner");
@@ -101,9 +88,17 @@ namespace BetterEssenceCorruptionHelper
         /// <param name="area">The new area instance object</param>
         public override void AreaChange(AreaInstance area)
         {
-            _entityTracker?.ResetState();
-            _mapStats.Reset();
-            _renderer?.UpdateSessionStatsCache();
+            // Map stats belong to one map instance. Town/hideout trips keep them (so they can still
+            // be shown there), and coming back through a portal lands in the same instance hash.
+            // Only entering a different non-peaceful instance starts a fresh tally.
+            var newMap = !area.IsPeaceful && area.Hash != _statsMapHash;
+            if (newMap)
+            {
+                _statsMapHash = area.Hash;
+                _mapStats.Reset();
+            }
+
+            _entityTracker?.ResetState(newMap);
         }
 
         /// <summary>
@@ -112,24 +107,6 @@ namespace BetterEssenceCorruptionHelper
         public override void Render()
         {
             _renderer?.Render();
-        }
-
-        #endregion
-
-        #region Coroutines
-
-        /// <summary>
-        /// Coroutine that periodically updates the cached statistics text.
-        /// </summary>
-        private IEnumerator StatsUpdateRoutine()
-        {
-            while (true)
-            {
-                yield return _statsUpdateWait;
-
-                if (Settings.Enable.Value && GameController.InGame)
-                    _renderer?.UpdateSessionStatsCache();
-            }
         }
 
         #endregion

@@ -5,17 +5,14 @@ using ExileCore.PoEMemory.Components;
 using ExileCore.PoEMemory.Elements;
 using ExileCore.PoEMemory.MemoryObjects;
 using ExileCore.Shared;
-using SharpDX;
 using System.Collections;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
-using Vector3 = SharpDX.Vector3;
+using System.Diagnostics.CodeAnalysis;
 
 namespace BetterEssenceCorruptionHelper
 {
     /// <summary>
     /// Handles entity tracking and processing for essence monoliths.
-    /// Manages the lifecycle of essence entities from detection to completion.
+    /// Manages the lifecycle of essence entities from detection to opening.
     /// </summary>
     /// <remarks>
     /// Initializes a new instance of the EssenceEntityTracker class.
@@ -27,26 +24,8 @@ namespace BetterEssenceCorruptionHelper
     {
         #region Constants
 
-        /// <summary>Distance threshold for determining if an essence has unloaded vs been killed (units)</summary>
-        private const int ESSENCE_UNLOAD_DISTANCE = 120;
-
-        /// <summary>Position tolerance for matching reloaded essences to their previous instances (units)</summary>
-        private const int POSITION_TOLERANCE = 2;
-
         /// <summary>Processing interval for entity scanning and state updates (milliseconds)</summary>
         private const int ENTITY_PROCESS_MS = 50;
-
-        /// <summary>
-        /// How long an essence must be continuously absent from the entity list before we accept
-        /// that it was actually killed/opened.
-        ///
-        /// GameController.Entities is rebuilt in the background (ExileCore's
-        /// ParseEntitiesInMultiThread), so a still-present essence can vanish from a single pass.
-        /// Treating that as a kill dropped the tracking entry, which then came back as a brand new
-        /// essence with a fresh ID - the counter climbing while stood still - and inflated the
-        /// killed/missed statistics every time it happened.
-        /// </summary>
-        private const int MISSING_GRACE_MS = 750;
 
         #endregion
 
@@ -57,44 +36,29 @@ namespace BetterEssenceCorruptionHelper
         private readonly MapStatistics _mapStats = mapStats;
 
         /// <summary>
-        /// Thread-safe dictionary tracking all currently visible essence monoliths.
-        /// Key: Entity memory address, Value: Tracking data for that essence.
-        /// Uses ConcurrentDictionary because entity processing runs on parallel thread.
+        /// Every essence monolith seen in the current area, keyed by game entity ID.
+        ///
+        /// The ID is what ExileCore itself keys entities by, and it survives an essence leaving and
+        /// re-entering the loaded area, so entries are simply kept until the area changes - no
+        /// address relinking or "was it killed or unloaded?" guesswork.
+        ///
+        /// A plain Dictionary is enough: every coroutine touching this runs on the main runner
+        /// with SyncModWork, which is the same thread that calls Render().
         /// </summary>
-        private readonly ConcurrentDictionary<long, EssenceEntityData> _trackedEntities = new();
+        private readonly Dictionary<uint, EssenceEntityData> _trackedEntities = new();
 
-        /// <summary>
-        /// Thread-safe counter for assigning unique IDs to essences.
-        /// Incremented via Interlocked.Increment to avoid race conditions.
-        /// </summary>
+        /// <summary>Display number counter. Survives hideout trips; restarts with each new map.</summary>
         private int _entityIdCounter;
 
         // Coroutine wait condition
         private readonly WaitTime _entityProcessWait = new(ENTITY_PROCESS_MS);
 
-        /// <summary>Monotonic clock used to age out essences that vanish from the entity list.</summary>
-        private readonly System.Diagnostics.Stopwatch _clock = System.Diagnostics.Stopwatch.StartNew();
-
         #endregion
 
         #region Properties
 
-        /// <summary>
-        /// Enumerates currently tracked entities. Deliberately not `.Values`, which copies the
-        /// whole collection into a new list on every access - this runs once per rendered frame.
-        /// ConcurrentDictionary's enumerator is safe against concurrent writes.
-        /// </summary>
-        public IEnumerable<EssenceEntityData> TrackedEntities
-        {
-            get
-            {
-                foreach (var kvp in _trackedEntities)
-                    yield return kvp.Value;
-            }
-        }
-
-        #endregion
-        #region Initialization
+        /// <summary>Enumerates currently tracked entities. Opened ones stay listed with State None.</summary>
+        public IEnumerable<EssenceEntityData> TrackedEntities => _trackedEntities.Values;
 
         #endregion
 
@@ -121,7 +85,7 @@ namespace BetterEssenceCorruptionHelper
         /// </summary>
         public void UpdateEntityLabels()
         {
-            if (_trackedEntities.IsEmpty)
+            if (_trackedEntities.Count == 0)
                 return;
 
             // Read the visible-label list once for the whole pass. Each access re-reads game
@@ -131,17 +95,22 @@ namespace BetterEssenceCorruptionHelper
             if (labels == null)
                 return;
 
-            foreach (var kvp in _trackedEntities)
+            foreach (var data in _trackedEntities.Values)
             {
-                var data = kvp.Value;
                 var entity = data.Entity;
                 if (entity == null)
                     continue;
 
+                // An opened monolith has nothing left to mark.
+                if (data.IsOpened)
+                {
+                    data.Label = null;
+                    continue;
+                }
+
                 // Re-resolve rather than `??=`. A LabelOnGround that has dropped out of
                 // ItemsOnGroundLabelsVisible keeps serving its last known rect, so caching the
-                // first one we ever saw leaves stale boxes drifting on screen until the essence
-                // is finally far enough away to be cleaned up.
+                // first one we ever saw leaves stale boxes drifting on screen.
                 data.Label = FindLabelIn(labels, entity.Address);
             }
         }
@@ -163,13 +132,17 @@ namespace BetterEssenceCorruptionHelper
         }
 
         /// <summary>
-        /// Clears all tracking data when entering a new area.
-        /// Essential because essence addresses/entities are area-specific.
+        /// Clears tracking data when entering a new area. Entity and label references belong to
+        /// the area being left, so they are always dropped; the display numbering only restarts on
+        /// a new map, so a hideout trip doesn't renumber the essences you come back to.
         /// </summary>
-        public void ResetState()
+        /// <param name="newMap">True when entering a different map instance than the last one</param>
+        public void ResetState(bool newMap)
         {
             _trackedEntities.Clear();
-            _entityIdCounter = 0;
+
+            if (newMap)
+                _entityIdCounter = 0;
         }
 
         #endregion
@@ -181,33 +154,47 @@ namespace BetterEssenceCorruptionHelper
         /// </summary>
         private void ProcessEssences()
         {
-            var currentMonoliths = new HashSet<long>();
-
             try
             {
-                // Scan all entities in game world
                 foreach (var entity in _gameController.Entities)
                 {
-                    if (!IsValidMonolith(entity))
+                    if (!IsValidMonolith(entity, out var monolith))
                         continue;
 
-                    // Get or create tracking data for this essence
-                    var data = GetOrCreateEntityData(entity, currentMonoliths);
-                    currentMonoliths.Add(entity.Address);
+                    var isOpenedNow = monolith.IsOpened;
 
-                    // Present again - cancel any in-flight "missing" grace period.
-                    data.MissingSinceMs = null;
+                    if (!_trackedEntities.TryGetValue(entity.Id, out var data))
+                    {
+                        // Only start tracking monoliths that can still be interacted with. One that
+                        // is already untargetable was opened before we got here (e.g. coming back
+                        // from the hideout) and has nothing to offer.
+                        if (!entity.IsTargetable)
+                            continue;
+
+                        data = CreateNewEssenceData(entity);
+                    }
+
+                    data.Entity = entity;
+                    data.Address = entity.Address;
+                    data.OpenStage = monolith.OpenStage;
+
+                    if (data.IsOpened)
+                        continue;
+
+                    if (!isOpenedNow)
+                    {
+                        data.WasSeenClosed = true;
+                    }
+                    else if (data.WasSeenClosed)
+                    {
+                        HandleEssenceOpened(data);
+                        continue;
+                    }
 
                     // Update state if label is available
                     if (data.Label != null)
                         UpdateEntityData(entity, data);
-
-                    // Always cache position for relinking after unload cycles
-                    data.LastKnownPosition = ToSharpDXVector3(entity.PosNum);
                 }
-
-                // Remove essences that were killed or unloaded
-                CleanupOldEssences(currentMonoliths);
             }
             catch (Exception ex)
             {
@@ -216,92 +203,20 @@ namespace BetterEssenceCorruptionHelper
         }
 
         /// <summary>
-        /// Gets existing tracking data for an entity or creates new data.
-        /// </summary>
-        private EssenceEntityData GetOrCreateEntityData(Entity entity, HashSet<long> currentMonoliths)
-        {
-            // Check if we're already tracking this address
-            if (_trackedEntities.TryGetValue(entity.Address, out var data))
-            {
-                data.Entity = entity; // Update entity reference
-                return data;
-            }
-
-            var entityPos = ToSharpDXVector3(entity.PosNum);
-
-            // Try to find an unloaded essence at this position
-            var existingData = FindUnloadedEssenceAtPosition(entityPos, currentMonoliths);
-
-            if (existingData != null)
-                return RelinkEssence(existingData, entity);
-
-            // Genuinely new essence - create fresh tracking data
-            return CreateNewEssenceData(entity);
-        }
-
-        /// <summary>
-        /// Searches for an unloaded essence at a specific position.
-        /// </summary>
-        private EssenceEntityData? FindUnloadedEssenceAtPosition(Vector3 position, HashSet<long> currentMonoliths)
-        {
-            foreach (var kvp in _trackedEntities)
-            {
-                var data = kvp.Value;
-
-                // Skip if already processed this frame
-                if (currentMonoliths.Contains(data.Address))
-                    continue;
-
-                // Check position match (within tolerance)
-                if (data.LastKnownPosition.HasValue &&
-                    Vector3.Distance(data.LastKnownPosition.Value, position) < POSITION_TOLERANCE)
-                {
-                    return data;
-                }
-            }
-            return null;
-        }
-
-        /// <summary>
-        /// Relinks essence tracking data to a new entity instance.
-        /// </summary>
-        private EssenceEntityData RelinkEssence(EssenceEntityData existingData, Entity entity)
-        {
-            // Remove old address mapping
-            _trackedEntities.TryRemove(existingData.Address, out _);
-
-            // Update to new address and entity reference
-            existingData.Address = entity.Address;
-            existingData.Entity = entity;
-
-            // Add new address mapping
-            _trackedEntities.TryAdd(entity.Address, existingData);
-
-            if (_settings.Debug.ShowDebugInfo.Value)
-            {
-                DebugWindow.LogMsg($"Essence Relinked: {existingData.EntityId} (Addr changed)", 3, SharpDX.Color.Cyan);
-            }
-
-            return existingData;
-        }
-
-        /// <summary>
         /// Creates new tracking data for a freshly discovered essence.
         /// </summary>
         private EssenceEntityData CreateNewEssenceData(Entity entity)
         {
-            // Thread-safe ID increment
-            var newId = Interlocked.Increment(ref _entityIdCounter);
-
             var newData = new EssenceEntityData
             {
-                EntityId = newId,
+                Id = entity.Id,
+                EntityId = ++_entityIdCounter,
                 Address = entity.Address,
                 Entity = entity,
                 Label = FindLabelForEntity(entity)
             };
 
-            _trackedEntities.TryAdd(entity.Address, newData);
+            _trackedEntities[entity.Id] = newData;
             return newData;
         }
 
@@ -378,86 +293,29 @@ namespace BetterEssenceCorruptionHelper
         }
 
         /// <summary>
-        /// Removes essences that are no longer visible from tracking.
+        /// Processes the monolith being opened (monster released) - the "killed" event. Driven by
+        /// the Monolith component's IsOpened flag, so it fires exactly once and doesn't depend on
+        /// where the player is standing.
         /// </summary>
-        private void CleanupOldEssences(HashSet<long> currentMonoliths)
+        private void HandleEssenceOpened(EssenceEntityData data)
         {
-            var player = _gameController.Player;
-            if (player == null)
-                return;
-
-            var playerPos = ToSharpDXVector3(player.PosNum);
-            var removedEntities = new List<long>();
-
-            // Create snapshot to avoid collection modification during enumeration
-            var snapshot = _trackedEntities.ToArray();
-
-            foreach (var kvp in snapshot)
-            {
-                var address = kvp.Key;
-                var data = kvp.Value;
-
-                // Still visible - skip
-                if (currentMonoliths.Contains(address))
-                    continue;
-
-                // Check if unloaded (player far away) vs killed (player nearby)
-                if (IsEssenceUnloaded(data, playerPos))
-                {
-                    // Player moved away - essence unloaded but might reload later
-                    // Clear label so it gets refreshed when player returns
-                    data.Label = null;
-                    data.MissingSinceMs = null;
-                    continue;
-                }
-
-                // Missing while the player is nearby. That usually means killed/opened, but the
-                // entity list can also drop an entity for a pass or two while it is rebuilt, so
-                // require the gap to persist before acting on it. Keeping the entry alive during
-                // the grace window is what lets the essence be recognised as the same one (and
-                // keep its ID) when it comes back.
-                var now = _clock.ElapsedMilliseconds;
-                data.MissingSinceMs ??= now;
-
-                if (now - data.MissingSinceMs.Value < MISSING_GRACE_MS)
-                    continue;
-
-                HandleEssenceKilled(data, address);
-                removedEntities.Add(address);
-            }
-
-            // Remove killed essences from tracking dictionary
-            foreach (var address in removedEntities)
-            {
-                _trackedEntities.TryRemove(address, out _);
-            }
-        }
-
-        /// <summary>
-        /// Determines if an essence was unloaded due to distance vs killed by player.
-        /// </summary>
-        private static bool IsEssenceUnloaded(EssenceEntityData data, Vector3 playerPos)
-        {
-            if (!data.LastKnownPosition.HasValue)
-                return false;
-
-            var distance = Vector3.Distance(playerPos, data.LastKnownPosition.Value);
-            return distance > ESSENCE_UNLOAD_DISTANCE;
-        }
-
-        /// <summary>
-        /// Processes essence kill/open event.
-        /// </summary>
-        private void HandleEssenceKilled(EssenceEntityData data, long address)
-        {
+            data.IsOpened = true;
             _mapStats.IncrementKilled();
 
-            // Check if player missed a corruption opportunity
+            // Check if player missed a corruption opportunity (must run before State is cleared)
             if (IsMissedCorruption(data))
             {
                 _mapStats.IncrementMissed();
-                DebugWindow.LogMsg($"MISSED CORRUPTION: Essence {data.EntityId} (0x{address:X}) should have been corrupted but was killed", 3, SharpDX.Color.Orange);
+                DebugWindow.LogMsg($"MISSED CORRUPTION: Essence {data.EntityId} (0x{data.Address:X}) should have been corrupted but was killed", 3, SharpDX.Color.Orange);
             }
+            else if (_settings.Debug.ShowDebugInfo.Value)
+            {
+                DebugWindow.LogMsg($"Essence {data.EntityId} opened (stage {data.OpenStage})", 3, SharpDX.Color.Cyan);
+            }
+
+            // Nothing left to draw for an opened monolith.
+            data.State = EssenceState.None;
+            data.Label = null;
         }
 
         /// <summary>
@@ -473,17 +331,21 @@ namespace BetterEssenceCorruptionHelper
         #region Entity Validation & Helpers
 
         /// <summary>
-        /// Validates if an entity is a valid essence monolith worth tracking.
+        /// Validates if an entity is a loaded essence monolith, and returns its Monolith component.
+        /// IsTargetable is deliberately not required here: a monolith stops being targetable once
+        /// opened, and a tracked one has to stay visible to us for the IsOpened flip to be seen.
         /// </summary>
-        private bool IsValidMonolith(Entity entity)
+        private bool IsValidMonolith(Entity entity, [NotNullWhen(true)] out Monolith? monolith)
         {
+            monolith = null;
+
             // Fast rejection checks first
             if (entity == null || entity.Address == 0 || !entity.IsValid ||
-                !entity.IsTargetable || entity.Address == _gameController.Player?.Address)
+                entity.Address == _gameController.Player?.Address)
                 return false;
 
             // Component checks
-            if (!entity.HasComponent<Render>() || !entity.HasComponent<Monolith>())
+            if (!entity.HasComponent<Render>() || !entity.TryGetComponent<Monolith>(out monolith) || monolith == null)
                 return false;
 
             // Position validation (try-catch for safety against memory read errors)
@@ -517,14 +379,6 @@ namespace BetterEssenceCorruptionHelper
         /// Determines if entity processing should run this frame.
         /// </summary>
         private bool ShouldProcess() => GameStateGates.ShouldTrackEssences(_gameController, _settings);
-
-        /// <summary>
-        /// Converts System.Numerics Vector3 to SharpDX Vector3.
-        /// </summary>
-        private static Vector3 ToSharpDXVector3(System.Numerics.Vector3 vec)
-        {
-            return new Vector3(vec.X, vec.Y, vec.Z);
-        }
 
         #endregion
     }

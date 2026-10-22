@@ -33,7 +33,10 @@ jobs:
         wget -q https://github.com/exApiTools/ExileApi-Compiled/raw/refs/heads/master/GameOffsets.dll -O libs/GameOffsets.dll
 
     - name: Build Release DLL
-      run: dotnet build ${{ env.PLUGIN_NAME }}.csproj --configuration Release
+      # Point the csproj's DepsDir at the downloaded DLLs. Without this, HintPath falls back to
+      # ..\..\.. (the HUD layout) and the build only resolved by luck, via MSBuild scanning the
+      # project folder for loose .dll files.
+      run: dotnet build ${{ env.PLUGIN_NAME }}.csproj --configuration Release -p:CI_LIBS_PATH=${{ github.workspace }}/libs
 
     - name: Create plugin folder
       run: |
