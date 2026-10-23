@@ -17,11 +17,31 @@ namespace BetterEssenceCorruptionHelper.Models
         Killed,
     }
 
-    /// <summary>A Vaal Orb used on the trapped monster: its contents before and after, and whether the strategy wanted it.</summary>
-    internal sealed record CorruptionObservation(
-        EssenceAnalysis Before,
-        EssenceAnalysis After,
-        bool WasRecommended);
+    /// <summary>
+    /// What the player did with the trapped monster, judged against the recommendation on screen at
+    /// the time. Decided when the Vaal Orb lands or when the monolith opens; counted in the stats only
+    /// once the freed monster dies.
+    /// </summary>
+    internal enum EssenceDecision
+    {
+        /// <summary>Still trapped and untouched, or opened while we weren't watching (not judged).</summary>
+        Undecided,
+
+        /// <summary>Vaal Orb used while the recommendation was CORRUPT.</summary>
+        Corrupted,
+
+        /// <summary>Vaal Orb used while the recommendation was KILL (or there was none).</summary>
+        WronglyCorrupted,
+
+        /// <summary>Opened without a Vaal Orb while the recommendation was CORRUPT.</summary>
+        MissedCorruption,
+
+        /// <summary>Opened without a Vaal Orb, as recommended (or it was already corrupted).</summary>
+        LeftUncorrupted,
+    }
+
+    /// <summary>A Vaal Orb used on the trapped monster: its contents before and after.</summary>
+    internal sealed record CorruptionObservation(EssenceAnalysis Before, EssenceAnalysis After);
 
     /// <summary>
     /// Tracking data for a single essence entity.
@@ -74,11 +94,11 @@ namespace BetterEssenceCorruptionHelper.Models
         /// <summary>True once the freed monster has been seen dead - that is when the kill is counted.</summary>
         public bool MonsterKilled => Phase == EssencePhase.Killed;
 
-        /// <summary>The player's Vaal Orb on this monster, or null if it wasn't corrupted by the player. Counted at the kill.</summary>
-        public CorruptionObservation? Corruption { get; set; }
+        /// <summary>What the player did with it; counted when the freed monster dies.</summary>
+        public EssenceDecision Decision { get; set; } = EssenceDecision.Undecided;
 
-        /// <summary>Released uncorrupted although the strategy said corrupt. Counted at the kill.</summary>
-        public bool Missed { get; set; }
+        /// <summary>The player's Vaal Orb on this monster (contents before/after), or null if they didn't corrupt it.</summary>
+        public CorruptionObservation? Corruption { get; set; }
 
         /// <summary>True while the monolith entity is in the loaded entity list (EntityAdded/EntityRemoved)</summary>
         public bool IsLoaded { get; set; } = true;

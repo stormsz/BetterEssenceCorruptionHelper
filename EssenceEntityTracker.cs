@@ -759,7 +759,8 @@ namespace BetterEssenceCorruptionHelper
         private void HandleEssenceCorruption(EssenceEntityData data, EssenceAnalysis before, EssenceAnalysis after, EssenceState shownState)
         {
             var wasRecommended = shownState == EssenceState.ShouldCorrupt;
-            data.Corruption = new CorruptionObservation(before, after, wasRecommended);
+            data.Corruption = new CorruptionObservation(before, after);
+            data.Decision = wasRecommended ? EssenceDecision.Corrupted : EssenceDecision.WronglyCorrupted;
 
             // The essences changed, and with them the trapped monster's mods: re-read its identity.
             data.MonsterIdentityReadMs = long.MinValue;
@@ -845,17 +846,22 @@ namespace BetterEssenceCorruptionHelper
             if (!observed)
             {
                 if (DiagnosticsOn)
-                    LogDiagnostic($"#{data.EntityId} id={data.Id}: found opened after loading back in - not judged as missed");
+                    LogDiagnostic($"#{data.EntityId} id={data.Id}: found opened after loading back in - not judged");
             }
-            else if (IsMissedCorruption(data))
+            else if (data.Decision == EssenceDecision.Undecided)
             {
-                data.Missed = true;
-                if (DiagnosticsOn)
-                    DebugWindow.LogMsg($"MISSED CORRUPTION: Essence {data.EntityId} (id={data.Id}) opened uncorrupted (pending kill)", 3, SharpDX.Color.Orange);
+                // Opened without a Vaal Orb. A label that was already corrupted had nothing left to decide.
+                data.Decision = data.State == EssenceState.ShouldCorrupt && !data.Analysis.IsCorrupted
+                    ? EssenceDecision.MissedCorruption
+                    : EssenceDecision.LeftUncorrupted;
             }
-            else if (DiagnosticsOn)
+
+            if (DiagnosticsOn)
             {
-                DebugWindow.LogMsg($"Essence {data.EntityId} released", 3, SharpDX.Color.Cyan);
+                if (data.Decision == EssenceDecision.MissedCorruption)
+                    DebugWindow.LogMsg($"MISSED CORRUPTION: Essence {data.EntityId} (id={data.Id}) opened uncorrupted (counted at the kill)", 3, SharpDX.Color.Orange);
+                else
+                    DebugWindow.LogMsg($"Essence {data.EntityId} released ({data.Decision})", 3, SharpDX.Color.Cyan);
             }
 
             if (!data.HasMonsterIdentity && DiagnosticsOn)
@@ -1260,9 +1266,12 @@ namespace BetterEssenceCorruptionHelper
 
         /// <summary>
         /// Whether a monster mod ID is one the essence monster gets from the essences it holds. In the
-        /// game data those are the "Essence..." mods (e.g. EssenceDaemonModLifeAndDamageLevel3) plus
-        /// the Remnant of Corruption ones; the pack around the monolith carries
-        /// "MonsterSupporterEssence..." mods instead, which don't identify the essence monster.
+        /// PoE1 game data each essence lists them as essence_monster_modifier_ids: the "Essence..." mods
+        /// (Deafening Essence of Greed: EssenceDaemonModLifeAndDamageLevel7; Essence of Delirium:
+        /// EssenceDaemonModLifeAndDamageCorrupt, EssenceInsectSummonedOnDeath, DecayOnHitEssenceMonster1)
+        /// plus the Remnant of Corruption ones. Many essences of a tier share the same life/damage mod,
+        /// so the fingerprint alone isn't unique - rarity and the rare's name narrow it down. The pack
+        /// around the monolith carries "MonsterSupporterEssence..." mods, which don't identify it.
         /// </summary>
         internal static bool IsEssenceMonsterMod(string? mod) =>
             !string.IsNullOrEmpty(mod) &&
@@ -1329,30 +1338,30 @@ namespace BetterEssenceCorruptionHelper
             data.Phase = EssencePhase.Killed;
             var stats = _session.Stats;
 
-            if (data.Corruption is { } corruption)
+            switch (data.Decision)
             {
-                if (corruption.WasRecommended)
-                {
+                case EssenceDecision.Corrupted:
                     stats.IncrementCorrupted();
                     if (DiagnosticsOn)
                         DebugWindow.LogMsg($"SUCCESSFUL CORRUPTION CONFIRMED: Essence {data.EntityId} killed", 3, SharpDX.Color.LightGreen);
-                }
-                else
-                {
+                    break;
+
+                case EssenceDecision.WronglyCorrupted:
                     stats.IncrementMistakes();
                     if (DiagnosticsOn)
                         DebugWindow.LogMsg($"MISTAKEN CORRUPTION CONFIRMED: Essence {data.EntityId} killed", 3, SharpDX.Color.OrangeRed);
-                }
+                    break;
 
-                RecordOutcome(data, corruption.Before, corruption.After, corruption.WasRecommended);
+                case EssenceDecision.MissedCorruption:
+                    stats.IncrementMissed();
+                    _corruptionLog.RecordMissed();
+                    if (DiagnosticsOn)
+                        DebugWindow.LogMsg($"MISSED CORRUPTION CONFIRMED: Essence {data.EntityId} killed without corrupting", 3, SharpDX.Color.Orange);
+                    break;
             }
-            else if (data.Missed)
-            {
-                stats.IncrementMissed();
-                _corruptionLog.RecordMissed();
-                if (DiagnosticsOn)
-                    DebugWindow.LogMsg($"MISSED CORRUPTION CONFIRMED: Essence {data.EntityId} killed without corrupting", 3, SharpDX.Color.Orange);
-            }
+
+            if (data.Corruption is { } corruption)
+                RecordOutcome(data, corruption.Before, corruption.After, data.Decision == EssenceDecision.Corrupted);
 
             stats.IncrementKilled();
             _corruptionLog.RecordKill();
@@ -1360,10 +1369,6 @@ namespace BetterEssenceCorruptionHelper
             if (DiagnosticsOn)
                 DebugWindow.LogMsg($"Essence {data.EntityId}: monster id={data.MonsterId} killed ({signal})", 3, SharpDX.Color.Cyan);
         }
-
-        /// <summary>Released uncorrupted while the recommendation on screen was CORRUPT.</summary>
-        private static bool IsMissedCorruption(EssenceEntityData data) =>
-            data.Corruption == null && !data.Analysis.IsCorrupted && data.State == EssenceState.ShouldCorrupt;
 
         #endregion
 

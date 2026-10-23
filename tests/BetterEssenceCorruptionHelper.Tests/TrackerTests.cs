@@ -4,7 +4,7 @@ namespace BetterEssenceCorruptionHelper.Tests;
 
 public class EssenceMonsterModTests
 {
-    /// <summary>Monster mod IDs from the game data (RePoE mods.json, 2026-10-23).</summary>
+    /// <summary>PoE1 essence_monster_modifier_ids (PoE wiki item data / RePoE mods.json, 2026-10-23).</summary>
     [Theory]
     [InlineData("EssenceDaemonModLifeAndDamageLevel3")]
     [InlineData("EssenceDaemonModLifeAndDamageCorrupt")]
