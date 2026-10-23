@@ -1266,12 +1266,12 @@ namespace BetterEssenceCorruptionHelper
 
         /// <summary>
         /// Whether a monster mod ID is one the essence monster gets from the essences it holds. In the
-        /// PoE1 game data each essence lists them as essence_monster_modifier_ids: the "Essence..." mods
-        /// (Deafening Essence of Greed: EssenceDaemonModLifeAndDamageLevel7; Essence of Delirium:
-        /// EssenceDaemonModLifeAndDamageCorrupt, EssenceInsectSummonedOnDeath, DecayOnHitEssenceMonster1)
-        /// plus the Remnant of Corruption ones. Many essences of a tier share the same life/damage mod,
-        /// so the fingerprint alone isn't unique - rarity and the rare's name narrow it down. The pack
-        /// around the monolith carries "MonsterSupporterEssence..." mods, which don't identify it.
+        /// PoE1 game data (RePoE mods.json) those are the monster mods of generation type "essence":
+        /// the "Essence..." ones (e.g. EssenceDaemonModLifeAndDamageLevel3, DecayOnHitEssenceMonster1)
+        /// and the RemnantOfCorruption ones. The life/damage mod only comes in eight variants (Level1-7
+        /// and Corrupt), so the fingerprint alone isn't unique - rarity and the rare's name narrow it
+        /// down. The pack around the monolith carries "MonsterSupporterEssence..." mods (generation
+        /// type "unique"), which don't identify the essence monster.
         /// </summary>
         internal static bool IsEssenceMonsterMod(string? mod) =>
             !string.IsNullOrEmpty(mod) &&
