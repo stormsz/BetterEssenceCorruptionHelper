@@ -1,4 +1,3 @@
-using BetterEssenceCorruptionHelper.Models;
 using ImGuiNET;
 using SharpDX;
 using System;
@@ -19,6 +18,8 @@ namespace BetterEssenceCorruptionHelper.UI
         private readonly EssenceIcons _icons = icons;
         private int _previewMode = 2; // 0 = Corrupt-Me, 1 = Kill-Ready, 2 = Side-by-Side
 
+        private static readonly string[] ModeNames = ["Corrupt-Me", "Kill-Ready", "Side-by-Side"];
+
         public void Draw()
         {
             ImGui.Spacing();
@@ -29,8 +30,7 @@ namespace BetterEssenceCorruptionHelper.UI
             ImGui.TextDisabled("LIVE OVERLAY PREVIEW");
             ImGui.SameLine(0, 16);
             ImGui.SetNextItemWidth(140);
-            var modeNames = new[] { "Corrupt-Me", "Kill-Ready", "Side-by-Side" };
-            ImGui.Combo("##indicatorPreviewMode", ref _previewMode, modeNames, modeNames.Length);
+            ImGui.Combo("##indicatorPreviewMode", ref _previewMode, ModeNames, ModeNames.Length);
 
             if (!_settings.Indicators.EnableAllIndicators.Value)
             {
@@ -45,18 +45,13 @@ namespace BetterEssenceCorruptionHelper.UI
             var isStacked = _previewMode == 2 && availWidth < 620f;
             var canvasHeight = isStacked ? 380f : 240f;
 
-            if (!ImGui.BeginChild("##indicatorPreviewCanvas", new Vector2(0, canvasHeight), ImGuiChildFlags.Border, ImGuiWindowFlags.NoScrollbar))
-                return;
+            if (PreviewCanvas.Begin("##indicatorPreviewCanvas", canvasHeight, out var drawList, out var canvasMin, out _))
+                DrawScene(drawList, canvasMin, availWidth);
+            PreviewCanvas.End();
+        }
 
-            var drawList = ImGui.GetWindowDrawList();
-            var canvasMin = ImGui.GetWindowPos();
-            var canvasSize = ImGui.GetWindowSize();
-            var canvasMax = canvasMin + canvasSize;
-
-            // Draw dark game-world background with subtle dungeon stone tint
-            drawList.AddRectFilled(canvasMin, canvasMax, ImGui.GetColorU32(new Vector4(0.06f, 0.07f, 0.08f, 1.0f)));
-            DrawFloorGrid(drawList, canvasMin, canvasMax);
-
+        private void DrawScene(ImDrawListPtr drawList, Vector2 canvasMin, float availWidth)
+        {
             var labelY = canvasMin.Y + 98f; // Leaves comfortable headroom above label for CORRUPT & profit badges
 
             if (_previewMode == 2 && availWidth >= 620f)
@@ -87,21 +82,18 @@ namespace BetterEssenceCorruptionHelper.UI
                 var centerX = canvasMin.X + availWidth * 0.5f;
                 DrawSimulatedMonolith(drawList, centerX, labelY, isCorruptTarget: true);
             }
-
-            ImGui.EndChild();
         }
 
         private void DrawSimulatedMonolith(ImDrawListPtr drawList, float centerX, float labelY, bool isCorruptTarget)
         {
-            // 280px wide to fit long essence names like 'Deafening Essence of Misery' without text clipping
-            const float labelWidth = 280f;
-            const float labelHeight = 88f;
+            const float labelWidth = PreviewCanvas.LabelWidth;
+            const float labelHeight = PreviewCanvas.LabelHeight;
 
             var labelMin = new Vector2(centerX - labelWidth / 2f, labelY);
             var labelMax = new Vector2(centerX + labelWidth / 2f, labelY + labelHeight);
 
             // 1. Draw simulated in-game ground label
-            DrawGroundLabel(drawList, labelMin, labelMax, isCorruptTarget);
+            PreviewCanvas.DrawGroundLabel(drawList, _icons, labelMin, labelMax, isCorruptTarget ? PreviewCanvas.CorruptSample : PreviewCanvas.KillSample);
 
             // 2. If master toggle is disabled, do not draw overlay
             if (!_settings.Indicators.EnableAllIndicators.Value)
@@ -192,61 +184,6 @@ namespace BetterEssenceCorruptionHelper.UI
             var bgColor = new Vector4(0f, 0f, 0f, 200f / 255f);
             drawList.AddRectFilled(bgMin, bgMax, ImGui.GetColorU32(bgColor), 0f);
             drawList.AddText(new Vector2(textPos.X - textSize.X / 2, textPos.Y), ImGui.GetColorU32(textColor), text);
-        }
-
-        private void DrawGroundLabel(ImDrawListPtr drawList, Vector2 min, Vector2 max, bool isCorruptTarget)
-        {
-            // PoE stone background
-            drawList.AddRectFilled(min, max, ImGui.GetColorU32(new Vector4(0.08f, 0.09f, 0.11f, 0.95f)), 2.0f);
-            // PoE stone/gold border
-            drawList.AddRect(min, max, ImGui.GetColorU32(new Vector4(0.38f, 0.32f, 0.22f, 0.85f)), 2.0f, ImDrawFlags.None, 1.5f);
-
-            // Title line: "Imprisoned Monster"
-            var titleColor = new Vector4(0.85f, 0.78f, 0.60f, 0.90f);
-            drawList.AddText(new Vector2(min.X + 8, min.Y + 5), ImGui.GetColorU32(titleColor), "Imprisoned Monster");
-            // Divider
-            drawList.AddLine(new Vector2(min.X + 6, min.Y + 22), new Vector2(max.X - 6, min.Y + 22), ImGui.GetColorU32(new Vector4(0.38f, 0.32f, 0.22f, 0.40f)));
-
-            var entries = isCorruptTarget
-                ? new (string Type, string Tier, Vector4 Color)[]
-                {
-                    ("Misery", "Deafening Essence of Misery", new Vector4(0.80f, 0.52f, 1.00f, 1f)),
-                    ("Scorn", "Shrieking Essence of Scorn", new Vector4(0.80f, 0.52f, 1.00f, 1f)),
-                    ("Zeal", "Wailing Essence of Zeal", new Vector4(0.96f, 0.74f, 0.30f, 1f)),
-                }
-                : new (string Type, string Tier, Vector4 Color)[]
-                {
-                    ("Greed", "Deafening Essence of Greed", new Vector4(0.50f, 0.62f, 1.00f, 1f)),
-                    ("Anger", "Screaming Essence of Anger", new Vector4(1.00f, 0.45f, 0.42f, 1f)),
-                    ("Torment", "Wailing Essence of Torment", new Vector4(0.38f, 0.86f, 0.55f, 1f)),
-                };
-
-            for (var i = 0; i < entries.Length; i++)
-            {
-                var entry = entries[i];
-                var rowY = min.Y + 26 + i * 20;
-
-                // Essence Icon
-                if (_icons.For(entry.Type) is { } icon)
-                {
-                    drawList.AddImage(icon, new Vector2(min.X + 8, rowY), new Vector2(min.X + 24, rowY + 16));
-                }
-                else
-                {
-                    drawList.AddRectFilled(new Vector2(min.X + 11, rowY + 3), new Vector2(min.X + 21, rowY + 13), ImGui.GetColorU32(entry.Color));
-                }
-
-                drawList.AddText(new Vector2(min.X + 28, rowY + 1), ImGui.GetColorU32(entry.Color), entry.Tier);
-            }
-        }
-
-        private static void DrawFloorGrid(ImDrawListPtr drawList, Vector2 min, Vector2 max)
-        {
-            var gridColor = ImGui.GetColorU32(new Vector4(1f, 1f, 1f, 0.025f));
-            for (var x = min.X + 20; x < max.X; x += 25)
-                drawList.AddLine(new Vector2(x, min.Y), new Vector2(x, max.Y), gridColor);
-            for (var y = min.Y + 20; y < max.Y; y += 25)
-                drawList.AddLine(new Vector2(min.X, y), new Vector2(max.X, y), gridColor);
         }
     }
 }

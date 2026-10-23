@@ -18,6 +18,9 @@ namespace BetterEssenceCorruptionHelper.Analysis
     {
         private const string EssenceOf = "Essence of ";
 
+        /// <summary>Last logged read failure (main thread only).</summary>
+        private static string? _lastError;
+
         /// <summary>
         /// Analyzes an essence monolith label. Returns <see cref="EssenceAnalysis.Invalid"/> on an
         /// unexpected structure or a failed read rather than throwing.
@@ -55,7 +58,13 @@ namespace BetterEssenceCorruptionHelper.Analysis
             }
             catch (Exception ex)
             {
-                ExileCore.DebugWindow.LogError($"Essence analysis failed: {ex.Message}");
+                // Read every 200ms per label: log a failure once, not on every read.
+                if (ex.Message != _lastError)
+                {
+                    _lastError = ex.Message;
+                    ExileCore.DebugWindow.LogError($"Essence analysis failed: {ex.Message}");
+                }
+
                 return EssenceAnalysis.Invalid;
             }
         }

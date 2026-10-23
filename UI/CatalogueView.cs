@@ -44,7 +44,7 @@ namespace BetterEssenceCorruptionHelper.UI
         private static readonly Vector4 NeutralGray = new(0.68f, 0.68f, 0.68f, 1f);
 
         /// <summary>Type name colours after poewiki's essence icons: A blue, B green, C amber, D red, E purple, F white.</summary>
-        private static Vector4 GroupColor(EssenceGroup group) => group switch
+        internal static Vector4 GroupColor(EssenceGroup group) => group switch
         {
             EssenceGroup.A => new Vector4(0.50f, 0.62f, 1.00f, 1f),
             EssenceGroup.B => new Vector4(0.38f, 0.86f, 0.55f, 1f),

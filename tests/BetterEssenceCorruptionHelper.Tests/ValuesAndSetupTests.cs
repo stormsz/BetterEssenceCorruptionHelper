@@ -71,6 +71,19 @@ public class EssenceValuesTests
     }
 
     [Fact]
+    public void An_unlisted_tier_does_not_cap_the_tiers_below_it()
+    {
+        // Shrieking Anger isn't traded: its 0.5c guess must not cap a listed Screaming; Deafening still does.
+        var market = new Dictionary<string, double> { ["Deafening Essence of Anger"] = 5, ["Screaming Essence of Anger"] = 4, ["Wailing Essence of Anger"] = 20 };
+        var values = EssenceValues.Compute(e => market.TryGetValue(e.Name, out var p) ? p : null, marketReady: true);
+        EssenceValue Of(string name) => values[EssenceCatalogue.FindByName(name)!];
+
+        Assert.Equal(ValueSource.Cheap, Of("Shrieking Essence of Anger").Source);
+        Assert.Equal((ValueSource.Market, 4.0), (Of("Screaming Essence of Anger").Source, Of("Screaming Essence of Anger").Chaos!.Value));
+        Assert.Equal((ValueSource.Capped, 4.0), (Of("Wailing Essence of Anger").Source, Of("Wailing Essence of Anger").Chaos!.Value));
+    }
+
+    [Fact]
     public void Micro_fluctuations_within_margin_are_not_capped()
     {
         var market = new Dictionary<string, double>

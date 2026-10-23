@@ -91,20 +91,24 @@ namespace BetterEssenceCorruptionHelper.Pricing
             {
                 foreach (var type in EssenceCatalogue.TypesIn(group))
                 {
+                    // The nearest tier above with a real price. An unlisted tier's guessed value
+                    // (CheapValue) is no evidence of what the tiers below are worth.
                     EssenceEntry? above = null;
                     for (var tier = EssenceTier.Deafening; tier >= EssenceCatalogue.MinTier(group); tier--)
                     {
                         var entry = EssenceCatalogue.Find(type, tier)!;
                         var upper = above != null ? result[above].Chaos : null;
 
-                        result[entry] = (market(entry), upper) switch
+                        var value = (market(entry), upper) switch
                         {
                             ({ } p, { } u) when p > u + OddPriceMargin => new EssenceValue(u, ValueSource.Capped, p, above),
                             ({ } p, _) => new EssenceValue(p, ValueSource.Market, p, null),
                             _ => missing,
                         };
 
-                        above = entry;
+                        result[entry] = value;
+                        if (value.Source is ValueSource.Market or ValueSource.Capped)
+                            above = entry;
                     }
                 }
             }

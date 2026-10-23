@@ -71,6 +71,9 @@ namespace BetterEssenceCorruptionHelper
         /// <summary>Re-read a label's text at least this often even if its line count didn't change, ms</summary>
         private const int ANALYSIS_REFRESH_MS = 200;
 
+        /// <summary>A changed label reading is read again after this long and only committed if it agrees, ms</summary>
+        private const int ANALYSIS_CONFIRM_MS = 50;
+
         /// <summary>Minimum gap between visible-label list scans while a tracked essence is missing its label, ms (~2 frames)</summary>
         private const int LABEL_SCAN_MIN_MS = 33;
 
@@ -433,7 +436,8 @@ namespace BetterEssenceCorruptionHelper
 
                 if (_session.ByMonsterId.TryGetValue(entity.Id, out var owner))
                 {
-                    if (owner.Monster == null && IsEntityValid(entity))
+                    // Re-attach after a missed EntityAdded, or replace a reference a missed EntityRemoved left stale.
+                    if (!ReferenceEquals(owner.Monster, entity) && (owner.Monster == null || !IsEntityValid(owner.Monster)) && IsEntityValid(entity))
                         owner.Monster = entity;
                     continue;
                 }
@@ -657,13 +661,13 @@ namespace BetterEssenceCorruptionHelper
                     continue;
 
                 var signature = EssenceLabelAnalyzer.ReadContentSignature(data.Label);
-                if (signature == data.LabelSignature && now - data.LastAnalysisMs < ANALYSIS_REFRESH_MS)
+                if (signature == data.LabelSignature && now < data.NextAnalysisMs)
                     continue;
 
                 data.LabelSignature = signature;
-                data.LastAnalysisMs = now;
+                data.NextAnalysisMs = now + ANALYSIS_REFRESH_MS;
                 _performance.Analyses++;
-                UpdateEntityData(data);
+                UpdateEntityData(data, now);
             }
         }
 
@@ -691,85 +695,105 @@ namespace BetterEssenceCorruptionHelper
             new(_values.ValueOf, _values.IsApproximate, _prices.VaalOrb.Value, _setup.Resolve(), _prices.Status == ProviderStatus.Ready);
 
         /// <summary>
-        /// Updates essence state based on label analysis.
+        /// Reads the label and acts on a change: a new reading is committed only once two reads agree
+        /// (see <see cref="EssenceEntityData.UnconfirmedAnalysis"/>), then judged for a corruption and
+        /// re-evaluated. An unchanged reading does nothing - input changes are handled by
+        /// <see cref="ReevaluateIfInputsChanged"/>.
         /// </summary>
-        private void UpdateEntityData(EssenceEntityData data)
+        private void UpdateEntityData(EssenceEntityData data, long now)
         {
-            if (data.Label == null)
-                return;
-
-            var newAnalysis = EssenceLabelAnalyzer.Analyze(data.Label);
+            var reading = EssenceLabelAnalyzer.Analyze(data.Label!);
             var previous = data.Analysis;
 
-            // A label caught mid-update reads as invalid for a frame; keep the last good reading rather
+            // A label caught mid-update can also read as invalid; keep the last good reading rather
             // than flickering the indicator.
-            if (!newAnalysis.IsValid && previous.IsValid)
+            if (!reading.IsValid && previous.IsValid)
                 return;
 
+            if (reading.SameContentAs(previous))
+            {
+                data.UnconfirmedAnalysis = null;
+                return;
+            }
+
+            if (data.UnconfirmedAnalysis?.SameContentAs(reading) != true)
+            {
+                data.UnconfirmedAnalysis = reading;
+                data.NextAnalysisMs = now + ANALYSIS_CONFIRM_MS;
+                return;
+            }
+
+            data.UnconfirmedAnalysis = null;
             var shownState = data.State;
+
+            var corruptedNow = IsCorruption(previous, reading);
+            if (corruptedNow && !reading.IsCorrupted)
+                reading = new EssenceAnalysis(true, true, reading.Essences, reading.UnrecognizedEssenceLines, reading.UnresolvedTypes);
 
             // Commit the new reading first, so a failure while handling a corruption below can't make
             // the next read see "uncorrupted -> corrupted" again and count it twice.
-            if (!newAnalysis.SameContentAs(previous))
-            {
-                data.Analysis = newAnalysis;
-                data.AnalysisVersion++;
-            }
+            data.Analysis = reading;
+            data.AnalysisVersion++;
 
-            // Detect corruption event:
-            // 1. Label says corrupted (case-insensitive)
-            // 2. OR the essences on the closed monolith changed (tiers increased, essence added, or transformed)
-            var essencesChanged = previous.IsValid && previous.EssenceCount > 0 && newAnalysis.IsValid && newAnalysis.EssenceCount > 0 &&
-                !newAnalysis.SameContentAs(previous);
+            if (corruptedNow)
+                HandleEssenceCorruption(data, previous, reading, shownState);
+            else if (!previous.IsValid && reading.IsCorrupted && data.Decision == EssenceDecision.Undecided)
+                data.Decision = EssenceDecision.AlreadyCorrupted;
 
-            var isCorrupted = newAnalysis.IsCorrupted || essencesChanged;
-
-            if (previous.IsValid && !previous.IsCorrupted && isCorrupted)
-            {
-                if (!newAnalysis.IsCorrupted)
-                {
-                    newAnalysis = new EssenceAnalysis(newAnalysis.IsValid, true, newAnalysis.Essences,
-                        newAnalysis.UnrecognizedEssenceLines, newAnalysis.UnresolvedTypes);
-                    data.Analysis = newAnalysis;
-                }
-
-                HandleEssenceCorruption(data, previous, newAnalysis, shownState);
-            }
-
-            ApplyRecommendation(data, StrategyEvaluator.Evaluate(data.Analysis, _settings.Tracking, CurrentProfitContext()));
+            ApplyRecommendation(data, StrategyEvaluator.Evaluate(reading, _settings.Tracking, CurrentProfitContext()));
         }
 
-        private static void ApplyRecommendation(EssenceEntityData data, Recommendation recommendation)
+        /// <summary>
+        /// Whether a confirmed change of the label from <paramref name="previous"/> to
+        /// <paramref name="reading"/> is the player's corruption. A Vaal Orb adds the "Corrupted" line;
+        /// essences changing without it is a corruption whose marker wasn't read. Only an uncorrupted
+        /// monster can be corrupted - never a second time - and a first reading is no change at all.
+        /// </summary>
+        internal static bool IsCorruption(EssenceAnalysis previous, EssenceAnalysis reading) =>
+            previous.IsValid && !previous.IsCorrupted && reading.IsValid && !reading.SameContentAs(previous) &&
+            (reading.IsCorrupted || (previous.EssenceCount > 0 && reading.EssenceCount > 0));
+
+        /// <summary>
+        /// How a release without a Vaal Orb is judged, from the advice on screen. Not judged when the
+        /// opening wasn't seen (<paramref name="observed"/> false) or the label was never read.
+        /// </summary>
+        internal static EssenceDecision JudgeRelease(EssenceState shownState, bool observed) =>
+            !observed ? EssenceDecision.NotJudged : shownState switch
+            {
+                EssenceState.ShouldCorrupt => EssenceDecision.MissedCorruption,
+                EssenceState.ShouldKill => EssenceDecision.KilledAsAdvised,
+                _ => EssenceDecision.NotJudged,
+            };
+
+        private void ApplyRecommendation(EssenceEntityData data, Recommendation recommendation)
         {
             var oldState = data.State;
             data.State = recommendation.State;
             data.StateReason = recommendation.Reason;
 
-            if (recommendation.State != oldState)
+            if (recommendation.State != oldState && DiagnosticsOn)
                 DebugWindow.LogMsg($"Essence {data.EntityId}: {oldState} -> {recommendation.State} ({recommendation.Reason})");
         }
 
-        /// <summary>
-        /// Handles essence corruption event. Staged as pending on the entity, committed only when the monster is killed.
-        /// </summary>
+        /// <summary>The player corrupted the trapped monster: judged now against the advice shown, counted at the kill.</summary>
         /// <param name="data">The corrupted essence</param>
         /// <param name="before">Its contents before the Vaal Orb</param>
         /// <param name="after">Its contents after</param>
-        /// <param name="shownState">The recommendation on screen when it was corrupted</param>
+        /// <param name="shownState">The advice on screen when it was corrupted</param>
         private void HandleEssenceCorruption(EssenceEntityData data, EssenceAnalysis before, EssenceAnalysis after, EssenceState shownState)
         {
-            var wasRecommended = shownState == EssenceState.ShouldCorrupt;
             data.Corruption = new CorruptionObservation(before, after);
-            data.Decision = wasRecommended ? EssenceDecision.Corrupted : EssenceDecision.WronglyCorrupted;
+            data.Decision = shownState == EssenceState.ShouldCorrupt
+                ? EssenceDecision.CorruptedAsAdvised
+                : EssenceDecision.CorruptedAgainstAdvice;
 
             // The essences changed, and with them the trapped monster's mods: re-read its identity.
             data.MonsterIdentityReadMs = long.MinValue;
 
             if (DiagnosticsOn)
             {
-                DebugWindow.LogMsg(
-                    $"Essence {data.EntityId} (id={data.Id}) corrupted (pending kill). Recommended: {wasRecommended}", 3,
-                    wasRecommended ? SharpDX.Color.LightGreen : SharpDX.Color.OrangeRed);
+                DebugWindow.LogMsg($"Essence {data.EntityId} (id={data.Id}) corrupted: {data.Decision} (counted at the kill)", 3,
+                    data.Decision == EssenceDecision.CorruptedAsAdvised ? SharpDX.Color.LightGreen : SharpDX.Color.OrangeRed);
             }
         }
 
@@ -833,7 +857,7 @@ namespace BetterEssenceCorruptionHelper
         /// <param name="now">Tracker clock (ms)</param>
         /// <param name="observed">
         /// False when the monolith was already open the first time it was read after loading back in
-        /// (opened by someone else, or while it was unloaded): it isn't judged as a missed corruption.
+        /// (opened by someone else, or while it was unloaded): there is nothing to judge.
         /// </param>
         private void HandleEssenceOpened(EssenceEntityData data, long now, bool observed)
         {
@@ -843,25 +867,17 @@ namespace BetterEssenceCorruptionHelper
             data.Phase = EssencePhase.Released;
             data.OpenedAtMs = now;
 
-            if (!observed)
-            {
-                if (DiagnosticsOn)
-                    LogDiagnostic($"#{data.EntityId} id={data.Id}: found opened after loading back in - not judged");
-            }
-            else if (data.Decision == EssenceDecision.Undecided)
-            {
-                // Opened without a Vaal Orb. A label that was already corrupted had nothing left to decide.
-                data.Decision = data.State == EssenceState.ShouldCorrupt && !data.Analysis.IsCorrupted
-                    ? EssenceDecision.MissedCorruption
-                    : EssenceDecision.LeftUncorrupted;
-            }
+            // Released without a Vaal Orb (a corruption or an already-corrupted label was decided
+            // earlier): judged against the advice that was on screen.
+            if (data.Decision == EssenceDecision.Undecided)
+                data.Decision = JudgeRelease(data.State, observed);
 
             if (DiagnosticsOn)
             {
                 if (data.Decision == EssenceDecision.MissedCorruption)
                     DebugWindow.LogMsg($"MISSED CORRUPTION: Essence {data.EntityId} (id={data.Id}) opened uncorrupted (counted at the kill)", 3, SharpDX.Color.Orange);
                 else
-                    DebugWindow.LogMsg($"Essence {data.EntityId} released ({data.Decision})", 3, SharpDX.Color.Cyan);
+                    DebugWindow.LogMsg($"Essence {data.EntityId} released ({data.Decision}{(observed ? "" : ", found opened after loading back in")})", 3, SharpDX.Color.Cyan);
             }
 
             if (!data.HasMonsterIdentity && DiagnosticsOn)
@@ -1340,13 +1356,13 @@ namespace BetterEssenceCorruptionHelper
 
             switch (data.Decision)
             {
-                case EssenceDecision.Corrupted:
+                case EssenceDecision.CorruptedAsAdvised:
                     stats.IncrementCorrupted();
                     if (DiagnosticsOn)
                         DebugWindow.LogMsg($"SUCCESSFUL CORRUPTION CONFIRMED: Essence {data.EntityId} killed", 3, SharpDX.Color.LightGreen);
                     break;
 
-                case EssenceDecision.WronglyCorrupted:
+                case EssenceDecision.CorruptedAgainstAdvice:
                     stats.IncrementMistakes();
                     if (DiagnosticsOn)
                         DebugWindow.LogMsg($"MISTAKEN CORRUPTION CONFIRMED: Essence {data.EntityId} killed", 3, SharpDX.Color.OrangeRed);
@@ -1361,7 +1377,7 @@ namespace BetterEssenceCorruptionHelper
             }
 
             if (data.Corruption is { } corruption)
-                RecordOutcome(data, corruption.Before, corruption.After, data.Decision == EssenceDecision.Corrupted);
+                RecordOutcome(data, corruption.Before, corruption.After, data.Decision == EssenceDecision.CorruptedAsAdvised);
 
             stats.IncrementKilled();
             _corruptionLog.RecordKill();

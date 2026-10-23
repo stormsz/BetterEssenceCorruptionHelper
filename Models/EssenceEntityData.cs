@@ -18,26 +18,32 @@ namespace BetterEssenceCorruptionHelper.Models
     }
 
     /// <summary>
-    /// What the player did with the trapped monster, judged against the recommendation on screen at
-    /// the time. Decided when the Vaal Orb lands or when the monolith opens; counted in the stats only
-    /// once the freed monster dies.
+    /// What the player did with the trapped monster, judged against the advice (CORRUPT / KILL) on
+    /// screen at the time. Decided when the Vaal Orb lands or when the monolith opens; counted in the
+    /// stats only once the freed monster dies.
     /// </summary>
     internal enum EssenceDecision
     {
-        /// <summary>Still trapped and untouched, or opened while we weren't watching (not judged).</summary>
+        /// <summary>Still trapped, nothing done to it yet.</summary>
         Undecided,
 
-        /// <summary>Vaal Orb used while the recommendation was CORRUPT.</summary>
-        Corrupted,
+        /// <summary>Vaal Orb used, as the CORRUPT advice said.</summary>
+        CorruptedAsAdvised,
 
-        /// <summary>Vaal Orb used while the recommendation was KILL (or there was none).</summary>
-        WronglyCorrupted,
+        /// <summary>Vaal Orb used although the advice was KILL.</summary>
+        CorruptedAgainstAdvice,
 
-        /// <summary>Opened without a Vaal Orb while the recommendation was CORRUPT.</summary>
+        /// <summary>Released without a Vaal Orb, as the KILL advice said: not every essence is worth corrupting.</summary>
+        KilledAsAdvised,
+
+        /// <summary>Released without a Vaal Orb although the advice was CORRUPT.</summary>
         MissedCorruption,
 
-        /// <summary>Opened without a Vaal Orb, as recommended (or it was already corrupted).</summary>
-        LeftUncorrupted,
+        /// <summary>Already corrupted when first seen (corrupted before we watched it); it can't be corrupted twice, so nothing to judge.</summary>
+        AlreadyCorrupted,
+
+        /// <summary>Released before any advice was shown, or while it wasn't loaded: nothing to judge.</summary>
+        NotJudged,
     }
 
     /// <summary>A Vaal Orb used on the trapped monster: its contents before and after.</summary>
@@ -73,8 +79,15 @@ namespace BetterEssenceCorruptionHelper.Models
         /// <summary>Label line count when last analysed - a change triggers an immediate re-analysis</summary>
         public long LabelSignature { get; set; } = -1;
 
-        /// <summary>Tracker clock (ms) of the last label analysis</summary>
-        public long LastAnalysisMs { get; set; } = long.MinValue;
+        /// <summary>Tracker clock (ms) at which the label is re-read even if its line count didn't change</summary>
+        public long NextAnalysisMs { get; set; } = long.MinValue;
+
+        /// <summary>
+        /// A label reading that differs from <see cref="Analysis"/> but hasn't been read the same way
+        /// twice yet. A label caught while it is being built reads with lines missing, which would look
+        /// like a corruption adding an essence; it is only committed once a second read agrees.
+        /// </summary>
+        public EssenceAnalysis? UnconfirmedAnalysis { get; set; }
 
         /// <summary>
         /// What the strategy recommends for the trapped monster (drives the CORRUPT / KILL indicator).
@@ -115,8 +128,8 @@ namespace BetterEssenceCorruptionHelper.Models
         /// <summary>Why <see cref="Assessment"/> is null, when it is</summary>
         public string? AssessmentUnavailableReason { get; set; }
 
-        /// <summary>(analysis version, price version, preferences version) the cached assessment was built from</summary>
-        public (int Analysis, int Prices, int Preferences) AssessmentKey { get; set; } = (-1, -1, -1);
+        /// <summary>(analysis, price, preferences, setup) versions the cached assessment was built from</summary>
+        public (int Analysis, int Prices, int Preferences, int Setup) AssessmentKey { get; set; } = (-1, -1, -1, -1);
 
         /// <summary>Indicator text for <see cref="Assessment"/> (built with it, not per frame)</summary>
         public string? ValueText { get; set; }

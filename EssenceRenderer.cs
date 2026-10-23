@@ -106,7 +106,7 @@ namespace BetterEssenceCorruptionHelper
         private CorruptionAssessment? GetAssessment(EssenceEntityData data)
         {
             var preferences = _settings.Tracking;
-            var key = (data.AnalysisVersion, _prices.Version, preferences.Version * 7919 + _setup.Version);
+            var key = (data.AnalysisVersion, _prices.Version, preferences.Version, _setup.Version);
             if (data.AssessmentKey == key)
                 return data.Assessment;
 
