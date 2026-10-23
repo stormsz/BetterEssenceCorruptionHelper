@@ -1,153 +1,152 @@
-using ExileCore.PoEMemory.Elements;
+using BetterEssenceCorruptionHelper.Catalogue;
 using BetterEssenceCorruptionHelper.Models;
+using ExileCore.PoEMemory.Elements;
+using System;
+using System.Collections.Generic;
 
 namespace BetterEssenceCorruptionHelper.Analysis
 {
     /// <summary>
-    /// Analyzes essence monolith UI labels to extract essence information and determine value.
-    /// 
-    /// Parses the label hierarchy to:
-    /// - Identify essence types and tiers
-    /// - Detect corruption status
-    /// - Apply value heuristics (MEDS patterns, count thresholds
+    /// Reads an essence monolith's ground label into an <see cref="EssenceAnalysis"/>.
+    ///
+    /// The label's second child holds one text line per essence (e.g. "Deafening Essence of Misery"),
+    /// plus a "Corrupted" line once the monster has been corrupted, plus - since 3.18.1 - the monster's
+    /// modifiers. Essence lines are matched to the catalogue by exact name, with a tolerant fallback
+    /// for decorated text; anything else is ignored except the corruption marker.
     /// </summary>
     internal static class EssenceLabelAnalyzer
     {
-        /// <summary>MEDS essences (Misery, Envy, Dread, Scorn) - always valuable for corruption</summary>
-        private static readonly string[] MedsEssences = ["Misery", "Envy", "Dread", "Scorn"];
+        private const string EssenceOf = "Essence of ";
 
         /// <summary>
-        /// Analyzes an essence monolith label to extract essence information.
-        /// 
-        /// Label structure expected:
-        /// - Parent label with children
-        /// - Second child contains essence text lines
-        /// - Each line contains essence name and tier
-        /// 
-        /// Throws on invalid structure but returns invalid analysis instead of exception.
+        /// Analyzes an essence monolith label. Returns <see cref="EssenceAnalysis.Invalid"/> on an
+        /// unexpected structure or a failed read rather than throwing.
         /// </summary>
-        /// <param name="label">The UI label element for the essence monolith</param>
-        /// <returns>Parsed essence analysis with counts and value patterns</returns>
         public static EssenceAnalysis Analyze(LabelOnGround label)
         {
-            var result = new EssenceAnalysis();
-
-            // Validate label structure
-            if (label?.Label?.Children == null || label.Label.Children.Count < 2)
-                return result;
-
-            var containerChild = label.Label.Children[1];
-            if (containerChild?.Children == null || containerChild.ChildCount == 0)
-                return result;
-
             try
             {
-                // Parse each text line in the label
-                foreach (var child in containerChild.Children)
-                {
-                    if (child == null || string.IsNullOrEmpty(child.Text))
-                        continue;
+                var children = label?.Label?.Children;
+                if (children == null || children.Count < 2)
+                    return EssenceAnalysis.Invalid;
 
-                    AnalyzeTextLine(child.Text, ref result);
+                var container = children[1];
+                if (container?.Children == null || container.ChildCount == 0)
+                    return EssenceAnalysis.Invalid;
+
+                var lines = new List<string>();
+                foreach (var child in container.Children)
+                {
+                    var text = child?.Text;
+                    if (!string.IsNullOrEmpty(text))
+                        lines.Add(text);
                 }
 
-                // Apply value heuristics based on parsed data
-                DetermineValuablePatterns(ref result);
-                result.IsValid = true;
+                return AnalyzeLines(lines);
             }
             catch (Exception ex)
             {
-                // Log error but don't crash - return invalid analysis
                 ExileCore.DebugWindow.LogError($"Essence analysis failed: {ex.Message}");
-                result.IsValid = false;
-            }
-
-            return result;
-        }
-
-        /// <summary>
-        /// Parses a single text line from an essence label.
-        /// 
-        /// Line formats:
-        /// - "Corrupted" - indicates already corrupted
-        /// - "Essence of {Name}" with tier prefix
-        /// - Tier prefixes: Deafening, Shrieking, Screaming, Wailing, Weeping, Muttering
-        /// 
-        /// Updates analysis in-place for performance.
-        /// </summary>
-        /// <param name="text">The text line to analyze</param>
-        /// <param name="result">Analysis struct to update (ref for performance)</param>
-        private static void AnalyzeTextLine(string text, ref EssenceAnalysis result)
-        {
-            // Early exit for corrupted essences (no further value in parsing)
-            if (text.Contains("Corrupted"))
-            {
-                result.IsCorrupted = true;
-                return;
-            }
-
-            // Check for MEDS essences (always valuable)
-            if (MedsEssences.Any(meds => text.Contains(meds)))
-            {
-                result.HasMeds = true;
-            }
-
-            // Count by tier (highest to lowest for performance)
-            if (text.Contains("Deafening"))
-            {
-                result.DeafeningCount++;
-                result.EssenceCount++;
-            }
-            else if (text.Contains("Shrieking"))
-            {
-                result.ShriekingCount++;
-                result.EssenceCount++;
-            }
-            else if (text.Contains("Screaming"))
-            {
-                result.ScreamingCount++;
-                result.EssenceCount++;
-            }
-            // Low tiers are counted toward the total but not tracked individually - nothing reads
-            // a per-tier breakdown below Screaming.
-            else if (text.Contains("Wailing") || text.Contains("Weeping") || text.Contains("Muttering"))
-            {
-                result.EssenceCount++;
-            }
-            else if (text.Contains("Essence of"))
-            {
-                // Fallback: an essence line with an unlisted tier prefix (e.g. Whispering) or none
-                // at all (the corruption-only essences). Matching on bare essence names here only
-                // ever added false positives from non-essence label lines.
-                result.EssenceCount++;
+                return EssenceAnalysis.Invalid;
             }
         }
 
         /// <summary>
-        /// Determines if an essence has a valuable pattern worth corrupting.
-        /// 
-        /// Value heuristics (in order of priority):
-        /// 1. Contains MEDS essences (always corrupt)
-        /// 2. Has 6+ total essences (high value cluster)
-        ///
-        /// There is deliberately no rule for Horror/Delirium/Hysteria/Insanity: they only exist on
-        /// already-corrupted monoliths, which are marked to kill before these rules are consulted.
+        /// A cheap value that changes whenever the label gains or loses a line (e.g. the "Corrupted" line
+        /// a Vaal Orb adds): the line count of the essence container. One element read instead of
+        /// reading every line's text. -1 when unreadable.
         /// </summary>
-        /// <param name="result">Analysis to evaluate and update</param>
-        private static void DetermineValuablePatterns(ref EssenceAnalysis result)
+        public static long ReadContentSignature(LabelOnGround label)
         {
-            // RULE 1: Always corrupt MEDS essences (can upgrade to Horror/Delirium/Hysteria/Insanity)
-            if (result.HasMeds)
+            try
             {
-                result.HasValuablePattern = true;
-                return;
+                return label?.Label?.GetChildAtIndex(1)?.ChildCount ?? -1;
+            }
+            catch
+            {
+                return -1;
+            }
+        }
+
+        /// <summary>Builds the analysis from the label's text lines.</summary>
+        public static EssenceAnalysis AnalyzeLines(IEnumerable<string> lines)
+        {
+            var corrupted = false;
+            var essences = new List<EssenceEntry>();
+            List<string>? unrecognized = null;
+            List<string>? unresolvedTypes = null;
+
+            foreach (var line in lines)
+            {
+                if (TryParseEssenceLine(line, out var entry, out var typeName))
+                {
+                    if (entry != null)
+                    {
+                        essences.Add(entry);
+                    }
+                    else
+                    {
+                        (unrecognized ??= []).Add(line.Trim());
+                        if (typeName != null && EssenceCatalogue.IsKnownType(typeName))
+                            (unresolvedTypes ??= []).Add(typeName);
+                    }
+                    continue;
+                }
+
+                // Essence names never contain "Corrupted", so this can only be the corruption marker
+                // (matched as loosely as earlier versions did).
+                if (line.Contains("Corrupted", StringComparison.Ordinal))
+                    corrupted = true;
             }
 
-            // RULE 2: Always corrupt 6+ essences (high value - corruption can upgrade multiple)
-            if (result.EssenceCount >= 6)
-            {
-                result.HasValuablePattern = true;
-            }
+            return new EssenceAnalysis(true, corrupted, essences, unrecognized ?? (IReadOnlyList<string>)[], unresolvedTypes);
+        }
+
+        /// <summary>
+        /// True when the line names an essence. <paramref name="entry"/> is its catalogue entry, or null
+        /// when the line looks like an essence ("... Essence of X") that the catalogue doesn't know.
+        /// </summary>
+        public static bool TryParseEssenceLine(string line, out EssenceEntry? entry) => TryParseEssenceLine(line, out entry, out _);
+
+        /// <summary>As above, also returning the type word after "Essence of" (null for an exact match).</summary>
+        public static bool TryParseEssenceLine(string line, out EssenceEntry? entry, out string? typeName)
+        {
+            entry = null;
+            typeName = null;
+            var text = line.Trim();
+
+            // Exact name - the normal case, one dictionary lookup.
+            entry = EssenceCatalogue.FindByName(text);
+            if (entry != null)
+                return true;
+
+            var at = text.IndexOf(EssenceOf, StringComparison.Ordinal);
+            if (at < 0)
+                return false;
+
+            // Decorated text (markup, counts): pick out "<Tier> Essence of <Type>" by its words.
+            var typeStart = at + EssenceOf.Length;
+            var typeEnd = typeStart;
+            while (typeEnd < text.Length && char.IsLetter(text[typeEnd]))
+                typeEnd++;
+            var type = text[typeStart..typeEnd];
+            typeName = type;
+
+            var tierEnd = at;
+            while (tierEnd > 0 && text[tierEnd - 1] == ' ')
+                tierEnd--;
+            var tierStart = tierEnd;
+            while (tierStart > 0 && char.IsLetter(text[tierStart - 1]))
+                tierStart--;
+            var tierWord = text[tierStart..tierEnd];
+
+            var tier = Enum.TryParse<EssenceTier>(tierWord, ignoreCase: false, out var parsed) &&
+                       parsed is >= EssenceTier.Whispering and <= EssenceTier.Deafening
+                ? parsed
+                : EssenceTier.Corrupted;
+
+            entry = EssenceCatalogue.Find(type, tier);
+            return true;
         }
     }
 }

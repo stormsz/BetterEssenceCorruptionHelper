@@ -25,6 +25,17 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
+    <!-- The test project lives in this folder but is not part of the plugin (the HUD compiles this csproj). -->
+    <Compile Remove="tests\**" />
+    <None Remove="tests\**" />
+    <EmbeddedResource Remove="tests\**" />
+    <InternalsVisibleTo Include="BetterEssenceCorruptionHelper.Tests" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Essence icons (poewiki inventory art, 32x32), extracted to the config folder at runtime. -->
+    <EmbeddedResource Include="Assets\Icons\*.png" LogicalName="BetterEssenceCorruptionHelper.Icons.%(Filename)%(Extension)" />
+  </ItemGroup>
+  <ItemGroup>
     <PackageReference Include="ImGui.NET" Version="1.90.0.1" />
     <PackageReference Include="SharpDX" Version="4.2.0" />
     <PackageReference Include="SharpDX.Mathematics" Version="4.2.0" />

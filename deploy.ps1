@@ -122,6 +122,9 @@ if ($Source) {
     $files = @(git -C $ProjectDir ls-files --cached --others --exclude-standard)
     if ($LASTEXITCODE -ne 0 -or $files.Count -eq 0) { throw "git ls-files failed in $ProjectDir." }
 
+    # The unit tests are a separate project; the HUD only needs the plugin.
+    $files = @($files | Where-Object { $_ -notlike 'tests/*' })
+
     Initialize-Target $target $hud 'Source'
     Write-Host "Copying $($files.Count) source files to $target"
 
@@ -134,10 +137,11 @@ if ($Source) {
             Copy-Item $from $to
         }
 
-        # Build the deployed copy in place: DepsDir falls back to ..\..\.. there, so this resolves
-        # ExileCore.dll exactly like the HUD's own compile does.
+        # Build the deployed copy in place, the way the HUD's PluginCompiler does on startup: plain
+        # MSBuild from the installed SDK, Debug + win-x64 (see obj\Debug\<tfm>\win-x64 in any source
+        # plugin). DepsDir falls back to ..\..\.. there, so ExileCore.dll resolves the same way too.
         Write-Host "Compile check against $(Split-Path $hud -Leaf)..."
-        & dotnet build (Join-Path $target "$PluginName.csproj") -c Release -nologo -v q | Out-Host
+        & dotnet build (Join-Path $target "$PluginName.csproj") -c Debug -p:RuntimeIdentifier=win-x64 -nologo -v q | Out-Host
         if ($LASTEXITCODE -ne 0) {
             Write-Host "Compile check FAILED against $(Split-Path $hud -Leaf)." -ForegroundColor Red
             exit 1

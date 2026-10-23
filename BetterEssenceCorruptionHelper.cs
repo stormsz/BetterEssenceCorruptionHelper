@@ -1,7 +1,13 @@
-﻿using BetterEssenceCorruptionHelper.Models;
+using BetterEssenceCorruptionHelper.Catalogue;
+using BetterEssenceCorruptionHelper.Models;
+using BetterEssenceCorruptionHelper.Pricing;
+using BetterEssenceCorruptionHelper.Strategy;
+using BetterEssenceCorruptionHelper.UI;
 using ExileCore;
+using ExileCore.PoEMemory.MemoryObjects;
 using ExileCore.Shared;
-using ExileCore.Shared.Enums;
+using System.Diagnostics;
+using System.IO;
 
 namespace BetterEssenceCorruptionHelper
 {
@@ -10,15 +16,23 @@ namespace BetterEssenceCorruptionHelper
         #region Fields
 
         private readonly MapStatistics _mapStats = new();
+        private readonly CorruptionLog _corruptionLog = new();
+        private readonly Stopwatch _clock = Stopwatch.StartNew();
         private EssenceEntityTracker? _entityTracker;
         private EssenceRenderer? _renderer;
+        private NinjaPriceBridge? _priceBridge;
+        private PriceBook? _prices;
+        private EssenceValues? _values;
+        private SetupDetector? _setup;
+        private Action? _catalogueDraw;
+        private Action? _diagnosticsDraw;
 
         /// <summary>Hash of the map instance the current stats belong to (0 = none yet)</summary>
         private uint _statsMapHash;
 
-        // Coroutine instances
-        private Coroutine? _entityProcessingCoroutine;
-        private Coroutine? _uiUpdateCoroutine;
+        /// <summary>This frame's gates, evaluated once in Tick and reused by Render.</summary>
+        private (bool Track, bool Render) _gates;
+        private long _gatesAtMs = long.MinValue;
 
         #endregion
 
@@ -32,51 +46,54 @@ namespace BetterEssenceCorruptionHelper
         {
             Name = "Better Essence Corruption Helper";
 
-            // Initialize components
-            _entityTracker = new EssenceEntityTracker(GameController, Settings, _mapStats);
-            _renderer = new EssenceRenderer(GameController, Settings, _mapStats, _entityTracker);
+            if (Settings.Tracking.Normalize() is { } note)
+                DebugWindow.LogMsg($"[{Name}] settings repaired: {note}", 5, SharpDX.Color.Yellow);
 
-            InitializeCoroutines();
+            _priceBridge = new NinjaPriceBridge(GameController);
+            _prices = new PriceBook(EssenceCatalogue.MarketItems, _priceBridge.Resolve, () => _clock.ElapsedMilliseconds);
+            _values = new EssenceValues(_prices);
+            _setup = new SetupDetector(GameController);
 
+            _entityTracker = new EssenceEntityTracker(GameController, Settings, _mapStats, _corruptionLog, _prices, _values, _setup, OutcomeCsvPath);
+            _renderer = new EssenceRenderer(GameController, Settings, _mapStats, _entityTracker, _prices, _values, _setup, _corruptionLog);
+
+            var icons = new EssenceIcons(Graphics, Path.Join(ConfigDirectory, "icons"));
+            var catalogueView = new CatalogueView(Settings, _prices, _values, _setup, _priceBridge, _entityTracker, _corruptionLog, icons,
+                () => _clock.ElapsedMilliseconds);
+            _catalogueDraw = catalogueView.Draw;
+            _diagnosticsDraw = catalogueView.DrawDiagnostics;
+            Settings.Catalogue.CatalogueView.DrawDelegate = _catalogueDraw;
+            Settings.Debug.Diagnostics.DrawDelegate = _diagnosticsDraw;
+
+            // No coroutines: all work runs in Tick on the main thread (see EssenceEntityTracker for the
+            // update path). ExileCore memory objects and ground-label Elements are backed by per-frame
+            // caches that are not thread-safe, and Render reads the very same Elements.
             DebugWindow.LogMsg($"[{Name}] initialized", 2, SharpDX.Color.Green);
             return base.Initialise();
         }
 
         /// <summary>
-        /// Configures and starts coroutines for background processing.
+        /// Hot reload (a new DLL dropped into Plugins\Compiled while the HUD runs) can leave this old
+        /// instance's settings page registered next to the new one's, showing a second strategy
+        /// selector. Blank our pages - but only if they are still ours, so a newer instance sharing the
+        /// same settings object keeps its own.
         /// </summary>
-        private void InitializeCoroutines()
+        public override void OnPluginDestroyForHotReload()
         {
-            // Create coroutine instances. Passing `this` as owner lets ExileCore pause them when
-            // the plugin is disabled and finish them on hot reload.
-            _entityProcessingCoroutine = new Coroutine(_entityTracker!.GetEntityProcessingCoroutine(), this, "BetterEssenceEntityProcessing");
-            _uiUpdateCoroutine = new Coroutine(_renderer!.GetUIUpdateCoroutine(), this, "BetterEssenceUIUpdate");
+            static void Blank(ExileCore.Shared.Nodes.CustomNode node, Action? ours)
+            {
+                if (ours != null && node.DrawDelegate == ours)
+                    node.DrawDelegate = () => { };
+            }
 
-            // Set execution priorities
-            _entityProcessingCoroutine.Priority = CoroutinePriority.Critical;
-            _uiUpdateCoroutine.Priority = CoroutinePriority.High;
-
-            var mainRunner = Core.MainRunner;
-
-            // Everything runs on the main runner, deliberately.
-            //
-            // Entity processing reads ExileCore memory objects (GameController.Entities, and the
-            // ground-label Element tree via EssenceLabelAnalyzer). Those are backed by per-frame
-            // caches that are not thread-safe, and Render() reads the very same Elements. Running
-            // the scan on Core.ParallelRunner raced the render thread over that shared cache state
-            // for no real benefit - the whole pass is a handful of entities at 20Hz, which is far
-            // too little work to be worth a thread.
-            //
-            // SyncModWork keeps them on this thread even when ExileCore's CoroutineMultiThreading
-            // option is on, which is also why the tracker can use plain collections.
-            _entityProcessingCoroutine.SyncModWork = true;
-            _uiUpdateCoroutine.SyncModWork = true;
-
-            mainRunner?.Run(_entityProcessingCoroutine);
-            mainRunner?.Run(_uiUpdateCoroutine);
-
-            DebugWindow.LogMsg($"[{Name}]: initialized on main runner");
+            Blank(Settings.Catalogue.CatalogueView, _catalogueDraw);
+            Blank(Settings.Debug.Diagnostics, _diagnosticsDraw);
+            base.OnPluginDestroyForHotReload();
         }
+
+        /// <summary>Where observed corruptions are appended, or null while recording is off.</summary>
+        private string? OutcomeCsvPath() =>
+            Settings.MapStats.RecordOutcomesCsv.Value ? Path.Join(ConfigDirectory, "corruption-outcomes.csv") : null;
 
         #endregion
 
@@ -99,6 +116,36 @@ namespace BetterEssenceCorruptionHelper
             }
 
             _entityTracker?.ResetState(newMap);
+            _renderer?.Reset();
+
+            // Ninja Price re-syncs its league on area change; sample again and re-resolve its bridge
+            // method in case it was reloaded.
+            _prices?.Invalidate(reResolveProvider: true);
+            _setup?.Invalidate();
+        }
+
+        /// <summary>ExileCore entity events drive monolith discovery (see EssenceEntityTracker).</summary>
+        public override void EntityAdded(Entity entity) => _entityTracker?.OnEntityAdded(entity);
+
+        public override void EntityRemoved(Entity entity) => _entityTracker?.OnEntityRemoved(entity);
+
+        /// <summary>
+        /// ExileCore per-frame update, main thread: gates, price sampling (when due) and tracking.
+        /// Returns no Job - nothing here may leave the main thread.
+        /// </summary>
+        public override Job Tick()
+        {
+            _gates = GameStateGates.Evaluate(GameController, Settings);
+            _gatesAtMs = _clock.ElapsedMilliseconds;
+
+            if (GameController.InGame && !GameController.IsLoading)
+            {
+                _prices?.Update();
+                _setup?.Update(_gatesAtMs);
+            }
+
+            _entityTracker?.Tick(_gates.Track);
+            return null!;
         }
 
         /// <summary>
@@ -106,7 +153,11 @@ namespace BetterEssenceCorruptionHelper
         /// </summary>
         public override void Render()
         {
-            _renderer?.Render();
+            // Reuse this frame's gates; fall back to evaluating them if Tick didn't run recently.
+            if (_clock.ElapsedMilliseconds - _gatesAtMs > 100)
+                _gates = GameStateGates.Evaluate(GameController, Settings);
+
+            _renderer?.Render(_gates.Render);
         }
 
         #endregion

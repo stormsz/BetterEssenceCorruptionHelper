@@ -1,19 +1,21 @@
-﻿using BetterEssenceCorruptionHelper.Analysis;
+using BetterEssenceCorruptionHelper.Analysis;
 using BetterEssenceCorruptionHelper.Models;
+using BetterEssenceCorruptionHelper.Pricing;
+using BetterEssenceCorruptionHelper.Strategy;
+using BetterEssenceCorruptionHelper.UI;
 using ExileCore;
 using ExileCore.PoEMemory;
-using ExileCore.PoEMemory.Elements;
-using ExileCore.Shared;
 using ImGuiNET;
 using SharpDX;
-using System.Collections;
 using System.Collections.Generic;
 using Vector2 = System.Numerics.Vector2;
 
 namespace BetterEssenceCorruptionHelper
 {
     /// <summary>
-    /// Handles all rendering and ImGui drawing
+    /// Handles all rendering and ImGui drawing. Only draws: everything it shows is computed by the
+    /// tracker or cached here against version counters, so a frame does no analysis and no string
+    /// building unless something changed.
     /// </summary>
     /// <remarks>
     /// Initializes a new instance of the EssenceRenderer class.
@@ -22,7 +24,12 @@ namespace BetterEssenceCorruptionHelper
     /// <param name="settings">Plugin settings</param>
     /// <param name="mapStats">Statistics tracker</param>
     /// <param name="entityTracker">Entity tracker</param>
-    internal class EssenceRenderer(GameController gameController, Settings settings, MapStatistics mapStats, EssenceEntityTracker entityTracker)
+    /// <param name="prices">Price snapshot</param>
+    /// <param name="values">Complete essence values built from the price snapshot</param>
+    /// <param name="setup">Map setup read from the game</param>
+    /// <param name="corruptionLog">Observed corruption outcomes</param>
+    internal class EssenceRenderer(GameController gameController, Settings settings, MapStatistics mapStats, EssenceEntityTracker entityTracker,
+        PriceBook prices, EssenceValues values, SetupDetector setup, CorruptionLog corruptionLog)
     {
         #region Fields
 
@@ -30,41 +37,36 @@ namespace BetterEssenceCorruptionHelper
         private readonly Settings _settings = settings;
         private readonly MapStatistics _mapStats = mapStats;
         private readonly EssenceEntityTracker _entityTracker = entityTracker;
+        private readonly PriceBook _prices = prices;
+        private readonly EssenceValues _values = values;
+        private readonly SetupDetector _setup = setup;
+        private readonly CorruptionLog _corruptionLog = corruptionLog;
 
-        // Coroutine wait condition
-        private readonly WaitRender _uiUpdateWait = new(2); // Every 2 frames
+        /// <summary>Debug overlay content per essence, rebuilt only when its inputs change.</summary>
+        private readonly Dictionary<uint, (int Key, List<List<(string text, Color color)>> Lines, float Width)> _debugCache = new();
+
+        private (int, int, int, int) _statsKey = (-1, -1, -1, -1);
+        private readonly List<(string Text, Color Color)> _statsLines = new();
 
         #endregion
 
         #region Public Methods
 
         /// <summary>
-        /// Gets a coroutine for UI updates.
+        /// Renders all visual elements. <paramref name="canRender"/> is the shared gate the plugin
+        /// evaluated this frame (enabled, in game, no full-screen panel open).
         /// </summary>
-        /// <returns>Coroutine that updates UI</returns>
-        public IEnumerator GetUIUpdateCoroutine()
+        public void Render(bool canRender)
         {
-            while (true)
-            {
-                yield return _uiUpdateWait;
-
-                if (ShouldProcess())
-                    _entityTracker.UpdateEntityLabels();
-            }
-        }
-
-        /// <summary>
-        /// Renders all visual elements.
-        /// </summary>
-        public void Render()
-        {
-            // If not enabled, not ingame, or any big ingame window is open then we dont render
-            if (!GameStateGates.ShouldRender(_gameController, _settings))
+            if (!canRender)
                 return;
 
             DrawEssenceIndicators();
             DrawMapStatsWindow();
         }
+
+        /// <summary>Drops per-essence caches (area change).</summary>
+        public void Reset() => _debugCache.Clear();
 
         #endregion
 
@@ -78,8 +80,8 @@ namespace BetterEssenceCorruptionHelper
             if (!_settings.Indicators.EnableAllIndicators.Value)
                 return;
 
-            // The tracker is only written by main-runner coroutines, on this same thread, so we
-            // iterate it directly instead of copying a snapshot list every single frame.
+            // The tracker is only written on the main thread (Tick and entity events), the same one
+            // that calls Render, so we iterate it directly instead of copying a snapshot every frame.
             var showDebug = _settings.Debug.ShowDebugInfo.Value;
 
             foreach (var data in _entityTracker.TrackedEntities)
@@ -90,6 +92,41 @@ namespace BetterEssenceCorruptionHelper
                 if (showDebug && data.Label?.Label != null)
                     DrawEssenceDebugWindow(data);
             }
+        }
+
+        /// <summary>
+        /// The corruption value analysis for an essence, recomputed only when its contents, the
+        /// prices, the strategy or the detected map setup changed.
+        /// </summary>
+        private CorruptionAssessment? GetAssessment(EssenceEntityData data)
+        {
+            var preferences = _settings.Tracking;
+            var key = (data.AnalysisVersion, _prices.Version, preferences.Version * 7919 + _setup.Version);
+            if (data.AssessmentKey == key)
+                return data.Assessment;
+
+            data.AssessmentKey = key;
+            data.Assessment = null;
+            data.ValueText = null;
+            data.AssessmentUnavailableReason = null;
+
+            if (!data.Analysis.IsValid || data.Analysis.IsCorrupted)
+                return null;
+
+            data.Assessment = CorruptionModel.Assess(
+                data.Analysis.Essences,
+                data.Analysis.UnrecognizedEssenceLines.Count,
+                _setup.Resolve(),
+                _values.ValueOf,
+                _prices.VaalOrb.Value,
+                out var reason,
+                _values.IsApproximate);
+            data.AssessmentUnavailableReason = reason;
+
+            if (data.Assessment is { } a)
+                data.ValueText = $"Vaal: {Format.SignedChaos(a.ExpectedNetGain)} expected";
+
+            return data.Assessment;
         }
 
         /// <summary>
@@ -189,7 +226,8 @@ namespace BetterEssenceCorruptionHelper
             if (indicator is null || !indicator.ShowIndicator.Value)
                 return;
 
-            if (!indicator.DrawBorder.Value && !indicator.DrawText.Value)
+            var showValue = _settings.Indicators.ShowValueRange.Value;
+            if (!indicator.DrawBorder.Value && !indicator.DrawText.Value && !showValue)
                 return;
 
             // Resolve geometry once and share it between the box and the text.
@@ -204,6 +242,10 @@ namespace BetterEssenceCorruptionHelper
 
             if (indicator.DrawText.Value)
                 DrawStatusText(drawRect, indicator, isCorruptTarget);
+
+            // The expected gain matters where a Vaal Orb is being considered: on CORRUPT monsters only.
+            if (showValue && isCorruptTarget && GetAssessment(data) is { } assessment && data.ValueText != null)
+                DrawValueText(drawRect, data.ValueText, assessment.ExpectedNetGain >= 0 ? Color.LimeGreen : Color.Orange, indicator.DrawText.Value);
         }
 
         /// <summary>
@@ -245,7 +287,19 @@ namespace BetterEssenceCorruptionHelper
 
             // Position text 25 pixels above the essence label
             var textPos = new Vector2(rect.Center.X, rect.Top - 25);
+            DrawCenteredTextWithBackground(textPos, text, indicator.TextColor.Value);
+        }
 
+        /// <summary>Draws the value range line above the status text (or where it would be).</summary>
+        private static void DrawValueText(RectangleF rect, string text, Color color, bool belowStatusText)
+        {
+            var lineHeight = ImGui.GetTextLineHeight() + 12;
+            var y = rect.Top - 25 - (belowStatusText ? lineHeight : 0);
+            DrawCenteredTextWithBackground(new Vector2(rect.Center.X, y), text, color);
+        }
+
+        private static void DrawCenteredTextWithBackground(Vector2 textPos, string text, Color color)
+        {
             var drawList = ImGui.GetBackgroundDrawList();
 
             // Calculate text size for centering
@@ -260,9 +314,8 @@ namespace BetterEssenceCorruptionHelper
             drawList.AddRectFilled(bgMin, bgMax, ImGui.GetColorU32(bgColor), 0f);
 
             // Draw centered text
-            var textColor = ToImguiVec4(indicator.TextColor.Value);
             var textDrawPos = new Vector2(textPos.X - textSize.X / 2, textPos.Y);
-            drawList.AddText(textDrawPos, ImGui.GetColorU32(textColor), text);
+            drawList.AddText(textDrawPos, ImGui.GetColorU32(ToImguiVec4(color)), text);
         }
 
         /// <summary>
@@ -274,7 +327,28 @@ namespace BetterEssenceCorruptionHelper
                 return;
 
             var rect = data.Label.Label.GetClientRectCache;
-            var debugLines = BuildDebugContent(data);
+            var assessment = GetAssessment(data);
+
+            var key = System.HashCode.Combine(data.AnalysisVersion, data.State, data.MonsterId, data.WasCorruptedByPlayer,
+                data.AssessmentKey, data.StateReason, (int)(data.GridPos?.X ?? 0), (int)(data.GridPos?.Y ?? 0));
+            if (!_debugCache.TryGetValue(data.Id, out var cached) || cached.Key != key)
+            {
+                var lines = BuildDebugContent(data, assessment);
+                var width = 0f;
+                foreach (var segments in lines)
+                {
+                    var lineWidth = 0f;
+                    foreach (var (text, _) in segments)
+                        lineWidth += ImGui.CalcTextSize(text).X;
+                    if (lineWidth > width)
+                        width = lineWidth;
+                }
+
+                cached = (key, lines, width);
+                _debugCache[data.Id] = cached;
+            }
+
+            var debugLines = cached.Lines;
 
             // Position flush to right edge of status box
             var debugWindowPos = new Vector2(rect.Right - 40, rect.Top);
@@ -297,17 +371,8 @@ namespace BetterEssenceCorruptionHelper
             ImGui.PushStyleColor(ImGuiCol.Border, ToImguiVec4(_settings.Debug.DebugBorderColor.Value));
             ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 1.0f);
 
-            // Calculate window size based on content width
-            var maxLineWidth = 0f;
-            foreach (var segments in debugLines)
-            {
-                var lineWidth = segments.Sum(seg => ImGui.CalcTextSize(seg.text).X);
-                if (lineWidth > maxLineWidth)
-                    maxLineWidth = lineWidth;
-            }
-
             // Set window dimensions (minimum width 260px, dynamic height)
-            var windowSize = new Vector2(Math.Max(260, maxLineWidth + 15), 10 + (debugLines.Count * 16));
+            var windowSize = new Vector2(Math.Max(260, cached.Width + 15), 10 + (debugLines.Count * 16));
 
             // Set position and size BEFORE Begin()
             ImGui.SetNextWindowPos(debugWindowPos);
@@ -331,6 +396,9 @@ namespace BetterEssenceCorruptionHelper
 
                         ImGui.TextColored(ToImguiVec4(color), text);
                     }
+
+                    if (segments.Count == 0)
+                        ImGui.Text("");
                 }
             }
 
@@ -349,6 +417,13 @@ namespace BetterEssenceCorruptionHelper
                 (_gameController.Area.CurrentArea.IsPeaceful && !_settings.MapStats.ShowInTownHideout.Value))
                 return;
 
+            var key = (_mapStats.Version, _corruptionLog.Version, _settings.Tracking.Version, _setup.Version);
+            if (key != _statsKey)
+            {
+                _statsKey = key;
+                BuildStatsLines();
+            }
+
             // Apply custom window styling
             ImGui.PushStyleColor(ImGuiCol.TitleBg, ToImguiVec4(_settings.MapStats.TitleBackground.Value));
             ImGui.PushStyleColor(ImGuiCol.TitleBgActive, ToImguiVec4(_settings.MapStats.TitleBackground.Value));
@@ -360,16 +435,16 @@ namespace BetterEssenceCorruptionHelper
             // return value (false means collapsed/clipped, not "no window was pushed").
             if (ImGui.Begin("Essence Map Stats"))
             {
-                var statColor = ToImguiVec4(_settings.MapStats.TextColor.Value);
-
                 ImGui.TextColored(ToImguiVec4(SharpDX.Color.White), "Map Totals");
                 ImGui.Separator();
 
-                // Display statistics
-                ImGui.TextColored(statColor, $"  Killed: {_mapStats.TotalKilled}");
-                ImGui.TextColored(statColor, $"  Corrupted: {_mapStats.TotalCorrupted}");
-                ImGui.TextColored(statColor, $"  Missed: {_mapStats.TotalMissed}");
-                ImGui.TextColored(statColor, $"  Mistakes: {_mapStats.TotalMistakes}");
+                foreach (var (text, color) in _statsLines)
+                {
+                    if (text.Length == 0)
+                        ImGui.Separator();
+                    else
+                        ImGui.TextColored(ToImguiVec4(color), text);
+                }
             }
 
             ImGui.End();
@@ -377,25 +452,71 @@ namespace BetterEssenceCorruptionHelper
             ImGui.PopStyleColor(5);
         }
 
+        /// <summary>Stats window text - rebuilt only when the stats, the outcome log or the strategy change.</summary>
+        private void BuildStatsLines()
+        {
+            _statsLines.Clear();
+            var statColor = _settings.MapStats.TextColor.Value;
+
+            // Display statistics
+            _statsLines.Add(($"  Killed: {_mapStats.TotalKilled}", statColor));
+            _statsLines.Add(($"  Corrupted: {_mapStats.TotalCorrupted}", statColor));
+            _statsLines.Add(($"  Missed: {_mapStats.TotalMissed}", statColor));
+            _statsLines.Add(($"  Mistakes: {_mapStats.TotalMistakes}", statColor));
+
+            _statsLines.Add(("", statColor));
+            _statsLines.Add(($"Strategy: {_settings.Tracking.Strategy.DisplayName}", Color.LightSkyBlue));
+            if (SetupStatus.Describe(_settings.Tracking.Strategy, _setup) is { } warning)
+                _statsLines.Add((warning.Title, warning.Level == SetupStatus.Level.Problem ? Color.OrangeRed : Color.Yellow));
+
+            if (_corruptionLog.Total == 0)
+                return;
+
+            _statsLines.Add(($"Session corruptions: {_corruptionLog.Total}", Color.White));
+            var parts = new List<string>();
+            foreach (var outcome in System.Enum.GetValues<CorruptionOutcome>())
+            {
+                var count = _corruptionLog.CountOf(outcome);
+                if (count > 0)
+                    parts.Add($"{OutcomeName(outcome)} {count}");
+            }
+            if (_corruptionLog.Unclassified > 0)
+                parts.Add($"unclassified {_corruptionLog.Unclassified}");
+            _statsLines.Add(($"  {string.Join(" · ", parts)}", statColor));
+
+            if (_corruptionLog.RealizedGainCount > 0)
+            {
+                var gain = _corruptionLog.RealizedGainSum;
+                _statsLines.Add(($"  Realised {Format.SignedChaos(gain)} over {_corruptionLog.RealizedGainCount} (listing prices)",
+                    gain >= 0 ? Color.LimeGreen : Color.OrangeRed));
+            }
+        }
+
         #endregion
 
         #region Helpers
 
-        /// <summary>
-        /// Determines if label refreshing should run this frame.
-        /// </summary>
-        private bool ShouldProcess() => GameStateGates.ShouldTrackEssences(_gameController, _settings);
+        internal static string OutcomeName(CorruptionOutcome outcome) => outcome switch
+        {
+            CorruptionOutcome.NoChange => "no change",
+            CorruptionOutcome.TierUpgrade => "tier +1",
+            CorruptionOutcome.AddEssence => "added essence",
+            CorruptionOutcome.Transform => "transformed",
+            CorruptionOutcome.ResonanceReplace => "resonance copy",
+            _ => outcome.ToString(),
+        };
 
         /// <summary>
         /// Builds debug content as list of lines.
         /// </summary>
-        private static List<List<(string text, Color color)>> BuildDebugContent(EssenceEntityData data)
+        private List<List<(string text, Color color)>> BuildDebugContent(EssenceEntityData data, CorruptionAssessment? assessment)
         {
             var lines = new List<List<(string, Color)>>();
 
             AddDebugHeader(lines, data);
             AddDebugEntityInfo(lines, data);
             AddDebugAnalysis(lines, data);
+            AddDebugAssessment(lines, data, assessment);
 
             return lines;
         }
@@ -413,7 +534,7 @@ namespace BetterEssenceCorruptionHelper
             };
 
             lines.Add([($"Essence #{data.EntityId}", Color.White)]);
-            lines.Add([("Status: ", Color.White), (stateString, stateColor)]);
+            lines.Add([("Status: ", Color.White), (stateString, stateColor), ($" ({data.StateReason})", Color.Gray)]);
 
             if (data.WasCorruptedByPlayer)
                 lines.Add([("Player Corrupted: ", Color.White), ("Yes", Color.Yellow)]);
@@ -422,30 +543,40 @@ namespace BetterEssenceCorruptionHelper
         }
 
         /// <summary>
-        /// Adds debug info showing the entity identity and the Monolith open state that drives
-        /// kill tracking, so both can be checked against what happens in game.
+        /// Adds debug info showing the entity identity and the trapped monster linked to it - the
+        /// monster whose death counts as the kill - so both can be checked against the game.
         /// </summary>
         private static void AddDebugEntityInfo(List<List<(string, Color)>> lines, EssenceEntityData data)
         {
             lines.Add([("Id: ", Color.White), ($"{data.Id}", Color.LightSkyBlue)]);
             lines.Add([("Addr: ", Color.White), ($"0x{data.Address:X12}", Color.LightSkyBlue)]);
-            lines.Add([
-                ("Opened: ", Color.White),
-                (data.IsOpened ? "Yes" : "No", data.IsOpened ? Color.Yellow : Color.White),
-                ($" (stage {data.OpenStage}, seen closed: {(data.WasSeenClosed ? "yes" : "no")})", Color.Gray)
-            ]);
+            lines.Add(data.MonsterId is { } monsterId
+                ? [("Monster: ", Color.White), ($"id={monsterId}", Color.LightGreen), ($" {SafeRenderName(data)} ({EssenceEntityTracker.RarityName(data.MonsterRarityRank)})", Color.Gray)]
+                : [("Monster: ", Color.White), ("not linked", Color.OrangeRed)]);
 
-            var pos = data.Entity?.GridPosNum;
-            if (pos.HasValue)
-                lines.Add([("Grid: ", Color.White), ($"({pos.Value.X:F0}, {pos.Value.Y:F0})", Color.LightYellow)]);
+            if (data.GridPos is { } pos)
+                lines.Add([("Grid: ", Color.White), ($"({pos.X:F0}, {pos.Y:F0})", Color.LightYellow)]);
 
             lines.Add([]); // Empty line for spacing
         }
 
+        /// <summary>The linked monster's name; its entity may be stale (unloaded), so a failed read is tolerated.</summary>
+        private static string SafeRenderName(EssenceEntityData data)
+        {
+            try
+            {
+                return data.Monster?.RenderName ?? "";
+            }
+            catch
+            {
+                return "(unreadable)";
+            }
+        }
+
         /// <summary>
-        /// Adds essence analysis details.
+        /// Adds essence analysis details: each essence with its price, before/after when corrupted.
         /// </summary>
-        private static void AddDebugAnalysis(List<List<(string, Color)>> lines, EssenceEntityData data)
+        private void AddDebugAnalysis(List<List<(string, Color)>> lines, EssenceEntityData data)
         {
             if (!data.Analysis.IsValid)
             {
@@ -453,105 +584,75 @@ namespace BetterEssenceCorruptionHelper
                 return;
             }
 
-            var showComparison = ShouldShowComparison(data);
+            if (data.WasCorruptedByPlayer && data.PreviousAnalysis is { IsValid: true } before)
+            {
+                var outcome = OutcomeClassifier.Classify(before.Essences, data.Analysis.Essences, out var ambiguous,
+                    CorruptionModel.ApplicableOutcomes(_setup.Resolve()));
+                lines.Add([("ANALYSIS (Before -> After): ", Color.Cyan),
+                    (outcome is { } o ? OutcomeName(o) + (ambiguous ? "?" : "") : "unclassified", Color.Yellow)]);
+                AddEssenceLines(lines, before, "  before ");
+                AddEssenceLines(lines, data.Analysis, "  after  ");
+                return;
+            }
 
-            if (showComparison)
-                AddComparisonAnalysis(lines, data);
-            else
-                AddCurrentAnalysis(lines, data);
+            lines.Add([("ANALYSIS: ", Color.Cyan), ($"{data.Analysis.EssenceCount} essences{(data.Analysis.IsCorrupted ? ", corrupted" : "")}", Color.White)]);
+            AddEssenceLines(lines, data.Analysis, "  ");
         }
 
-        /// <summary>
-        /// Checks if we should show before/after comparison.
-        /// </summary>
-        private static bool ShouldShowComparison(EssenceEntityData data) =>
-            data.WasCorruptedByPlayer &&
-            data.PreviousAnalysis.HasValue &&
-            data.PreviousAnalysis.Value.IsValid;
-
-        /// <summary>
-        /// Shows before/after comparison of essence analysis.
-        /// </summary>
-        private static void AddComparisonAnalysis(List<List<(string, Color)>> lines, EssenceEntityData data)
+        private void AddEssenceLines(List<List<(string, Color)>> lines, EssenceAnalysis analysis, string indent)
         {
-            var prev = data.PreviousAnalysis!.Value;
-            lines.Add([("ANALYSIS (Before -> After)", Color.Cyan)]);
+            foreach (var essence in analysis.Essences)
+            {
+                var value = _values.Get(essence);
+                lines.Add([(indent + essence.Name, essence.IsMeds ? Color.Violet : Color.White),
+                    ("  " + Format.Value(value), value.Source == ValueSource.Market ? Color.LightGreen : Color.Gray)]);
+            }
 
-            AddComparisonLine(lines, "Total", prev.EssenceCount, data.Analysis.EssenceCount);
+            foreach (var line in analysis.UnrecognizedEssenceLines)
+                lines.Add([(indent + line, Color.Orange), ("  (not in catalogue)", Color.Gray)]);
+        }
 
-            if (prev.DeafeningCount > 0 || data.Analysis.DeafeningCount > 0)
-                AddComparisonLine(lines, "Deafening", prev.DeafeningCount, data.Analysis.DeafeningCount);
-            if (prev.ShriekingCount > 0 || data.Analysis.ShriekingCount > 0)
-                AddComparisonLine(lines, "Shrieking", prev.ShriekingCount, data.Analysis.ShriekingCount);
-            if (prev.ScreamingCount > 0 || data.Analysis.ScreamingCount > 0)
-                AddComparisonLine(lines, "Screaming", prev.ScreamingCount, data.Analysis.ScreamingCount);
+        /// <summary>Adds the corruption value analysis: per-outcome ranges, bounds and verdict.</summary>
+        private static void AddDebugAssessment(List<List<(string, Color)>> lines, EssenceEntityData data, CorruptionAssessment? assessment)
+        {
+            if (data.Analysis.IsCorrupted || !data.Analysis.IsValid)
+                return;
 
             lines.Add([]);
-            AddComparisonLineBool(lines, "MEDS", prev.HasMeds, data.Analysis.HasMeds);
-            AddComparisonLineBool(lines, "Valuable", prev.HasValuablePattern, data.Analysis.HasValuablePattern);
-        }
+            if (assessment == null)
+            {
+                lines.Add([("VAAL ORB VALUE: ", Color.Cyan), (data.AssessmentUnavailableReason ?? "unavailable", Color.Gray)]);
+                return;
+            }
 
-        /// <summary>
-        /// Shows current essence analysis (no comparison).
-        /// </summary>
-        private static void AddCurrentAnalysis(List<List<(string, Color)>> lines, EssenceEntityData data)
-        {
-            lines.Add([("ANALYSIS", Color.Cyan)]);
-            lines.Add([("Total: ", Color.White), ($"{data.Analysis.EssenceCount}", Color.Green)]);
+            lines.Add([("VAAL ORB VALUE ", Color.Cyan), ($"(now {Format.Chaos(assessment.CurrentValue)}, orb {Format.Chaos(assessment.VaalOrbCost)})", Color.Gray)]);
+            foreach (var o in assessment.Outcomes)
+            {
+                var range = Math.Abs(o.MaxGain - o.MinGain) < 1e-9
+                    ? Format.SignedChaos(o.MinGain)
+                    : $"{Format.SignedChaos(o.MinGain)}..{Format.SignedChaos(o.MaxGain)}";
+                lines.Add([($"  {OutcomeName(o.Outcome)}: ", Color.White), (range, Color.LightGray)]);
+            }
 
-            if (data.Analysis.DeafeningCount > 0)
-                lines.Add([("Deafening: ", Color.White), ($"{data.Analysis.DeafeningCount}", Color.Green)]);
-            if (data.Analysis.ShriekingCount > 0)
-                lines.Add([("Shrieking: ", Color.White), ($"{data.Analysis.ShriekingCount}", Color.Green)]);
-            if (data.Analysis.ScreamingCount > 0)
-                lines.Add([("Screaming: ", Color.White), ($"{data.Analysis.ScreamingCount}", Color.White)]);
+            var (verdictText, verdictColor) = assessment.Verdict switch
+            {
+                CorruptionVerdict.AlwaysGains => ("gains in every outcome", Color.LimeGreen),
+                CorruptionVerdict.AlwaysLoses => ("loses in every outcome", Color.OrangeRed),
+                _ => ("depends on unpublished odds", Color.Yellow),
+            };
+            var approx = assessment.IsApproximate ? " (approx.)" : "";
+            lines.Add([("  net: ", Color.White), ($"{Format.SignedChaos(assessment.WorstNetGain)}..{Format.SignedChaos(assessment.BestNetGain)}, ", Color.LightGray), (verdictText + approx, verdictColor)]);
 
-            lines.Add([]);
-            AddBooleanLine(lines, "MEDS", data.Analysis.HasMeds);
-            AddBooleanLine(lines, "Valuable", data.Analysis.HasValuablePattern);
-        }
-
-        /// <summary>
-        /// Adds comparison line showing before/after numeric values.
-        /// </summary>
-        private static void AddComparisonLine(List<List<(string text, Color color)>> lines, string label, int prev, int curr)
-        {
-            var currColor = curr > prev ? Color.Green : curr < prev ? Color.Red : Color.White;
-            lines.Add([
-                ($"{label}: ", Color.White),
-                ($"{prev}", Color.White),
-                (" -> ", Color.White),
-                ($"{curr}", currColor)
-            ]);
-        }
-
-        /// <summary>
-        /// Adds comparison line showing before/after boolean values.
-        /// </summary>
-        private static void AddComparisonLineBool(List<List<(string text, Color color)>> lines, string label, bool prev, bool curr)
-        {
-            var currColor = curr ? Color.Green : Color.Red;
-            lines.Add([
-                ($"{label}: ", Color.White),
-                (prev ? "Yes" : "No", Color.White),
-                (" -> ", Color.White),
-                (curr ? "Yes" : "No", currColor)
-            ]);
-        }
-
-        /// <summary>
-        /// Adds single boolean line with color coding.
-        /// </summary>
-        private static void AddBooleanLine(List<List<(string text, Color color)>> lines, string label, bool value)
-        {
-            var color = value ? Color.Green : Color.Red;
-            lines.Add([($"{label}: ", Color.White), (value ? "Yes" : "No", color)]);
+            if (assessment.EstimatedItems.Count > 0)
+                lines.Add([("  estimated: ", Color.Gray), (string.Join(", ", assessment.EstimatedItems), Color.Gray)]);
+            if (assessment.UnpricedItems.Count > 0)
+                lines.Add([("  counted as 0c: ", Color.Gray), (string.Join(", ", assessment.UnpricedItems), Color.Gray)]);
         }
 
         /// <summary>
         /// Converts SharpDX Color to ImGui Vector4 format.
         /// </summary>
-        private static System.Numerics.Vector4 ToImguiVec4(SharpDX.Color color)
+        internal static System.Numerics.Vector4 ToImguiVec4(SharpDX.Color color)
         {
             return new System.Numerics.Vector4(
                 color.R / 255f,

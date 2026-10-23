@@ -12,7 +12,7 @@
     /// </summary>
     internal class MapStatistics
     {
-        /// <summary>Total number of essences killed/opened by the player</summary>
+        /// <summary>Essence monsters killed - counted when the released monster dies, not when its monolith is opened</summary>
         public int TotalKilled { get; private set; }
 
         /// <summary>Number of essences that were successfully corrupted (were valuable)</summary>
@@ -24,13 +24,16 @@
         /// <summary>Number of non-valuable essences that were corrupted (wasted corruption attempts)</summary>
         public int TotalMistakes { get; private set; }
 
-        public void IncrementKilled() => TotalKilled++;
+        /// <summary>Bumped on every change, so the stats window only rebuilds its text when needed</summary>
+        public int Version { get; private set; }
 
-        public void IncrementCorrupted() => TotalCorrupted++;
+        public void IncrementKilled() { TotalKilled++; Version++; }
 
-        public void IncrementMissed() => TotalMissed++;
+        public void IncrementCorrupted() { TotalCorrupted++; Version++; }
 
-        public void IncrementMistakes() => TotalMistakes++;
+        public void IncrementMissed() { TotalMissed++; Version++; }
+
+        public void IncrementMistakes() { TotalMistakes++; Version++; }
 
         public void Reset()
         {
@@ -38,6 +41,7 @@
             TotalCorrupted = 0;
             TotalMissed = 0;
             TotalMistakes = 0;
+            Version++;
         }
     }
 }

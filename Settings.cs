@@ -1,7 +1,9 @@
-﻿using ExileCore.Shared.Attributes;
+using ExileCore.Shared.Attributes;
 using ExileCore.Shared.Interfaces;
 using ExileCore.Shared.Nodes;
 using SharpDX;
+using BetterEssenceCorruptionHelper.Strategy;
+using Newtonsoft.Json;
 
 namespace BetterEssenceCorruptionHelper
 {
@@ -13,10 +15,15 @@ namespace BetterEssenceCorruptionHelper
             Indicators = new IndicatorSettings();
             MapStats = new MapStatsSettings();
             Debug = new DebugSettings();
+            Catalogue = new EssenceCatalogueSettings();
+            Tracking = new TrackingPreferences();
         }
 
         [Menu("Enable", "Turns the entire plugin on/off")]
         public ToggleNode Enable { get; set; }
+
+        [Menu("Strategy", 25, CollapsedByDefault = false)]
+        public EssenceCatalogueSettings Catalogue { get; set; }
 
         [Menu("Essence Indicators", 50, CollapsedByDefault = false)]
         public IndicatorSettings Indicators { get; set; }
@@ -24,7 +31,14 @@ namespace BetterEssenceCorruptionHelper
         [Menu("Essence Map Stats", 100, CollapsedByDefault = false)]
         public MapStatsSettings MapStats { get; set; }
 
-        [Menu("Debug Settings", 200, CollapsedByDefault = true)]
+        /// <summary>
+        /// Strategy and per-essence corruption choices. Plain data, kept out of the generated menu: it is
+        /// edited through the catalogue view and persisted with the rest of the settings.
+        /// </summary>
+        [IgnoreMenu]
+        public TrackingPreferences Tracking { get; set; }
+
+        [Menu("Debug & Diagnostics", 200, CollapsedByDefault = true)]
         public DebugSettings Debug { get; set; }
     }
 
@@ -45,6 +59,9 @@ namespace BetterEssenceCorruptionHelper
 
         [Menu("Kill-Ready Indicator", 200)]
         public KillReadySettings KillReady { get; set; } = new KillReadySettings();
+
+        [Menu("Show Expected Profit", "Above CORRUPT, show how much a Vaal Orb is expected to add, after its own cost, at current prices")]
+        public ToggleNode ShowValueRange { get; set; } = new ToggleNode(true);
     }
 
     /// <summary>
@@ -138,6 +155,9 @@ namespace BetterEssenceCorruptionHelper
         [Menu("Show in Town/Hideout", "Display stats window even in town or hideout")]
         public ToggleNode ShowInTownHideout { get; set; } = new ToggleNode(false);
 
+        [Menu("Record Corruption Outcomes (CSV)", "Append every observed corruption (before/after essences, outcome, prices) to corruption-outcomes.csv in this plugin's config folder")]
+        public ToggleNode RecordOutcomesCsv { get; set; } = new ToggleNode(false);
+
         [Menu("Title Background", "Background color for window title")]
         public ColorNode TitleBackground { get; set; } = new ColorNode(new Color(0, 157, 255, 200));
 
@@ -154,6 +174,18 @@ namespace BetterEssenceCorruptionHelper
         public ColorNode BorderColor { get; set; } = new ColorNode(new Color(100, 100, 100, 200));
     }
 
+    /// <summary>
+    /// The strategy picker, the Essence catalogue (MEDS first, prices, tracking checkboxes) and the
+    /// price diagnostics. All drawn by CatalogueView; the choices themselves live in
+    /// <see cref="Settings.Tracking"/>.
+    /// </summary>
+    [Submenu(CollapsedByDefault = false)]
+    public class EssenceCatalogueSettings
+    {
+        [JsonIgnore]
+        public CustomNode CatalogueView { get; set; } = new CustomNode();
+    }
+
     [Submenu(CollapsedByDefault = true)]
     public class DebugSettings
     {
@@ -168,5 +200,9 @@ namespace BetterEssenceCorruptionHelper
 
         [Menu("Border Color", "Border color for debug window")]
         public ColorNode DebugBorderColor { get; set; } = new ColorNode(Color.Gray);
+
+        /// <summary>Copy buttons, the item mapping table and the game-files check, drawn by CatalogueView.</summary>
+        [JsonIgnore]
+        public CustomNode Diagnostics { get; set; } = new CustomNode();
     }
 }

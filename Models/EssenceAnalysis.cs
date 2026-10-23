@@ -1,36 +1,63 @@
-﻿namespace BetterEssenceCorruptionHelper.Models
+using BetterEssenceCorruptionHelper.Catalogue;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace BetterEssenceCorruptionHelper.Models
 {
     /// <summary>
-    /// Represents the analysis results of an essence monolith.
-    /// Contains parsed information about essence types, tiers, and value patterns.
+    /// What an essence monolith's label says: which essences the monster holds and whether it is
+    /// already corrupted. Immutable, so a reference can be kept as the "before" of a corruption.
     /// </summary>
-    internal struct EssenceAnalysis
+    internal sealed class EssenceAnalysis
     {
+        /// <summary>The label couldn't be read (missing or unexpected structure).</summary>
+        public static readonly EssenceAnalysis Invalid = new(false, false, [], []);
+
+        public EssenceAnalysis(bool isValid, bool isCorrupted, IReadOnlyList<EssenceEntry> essences, IReadOnlyList<string> unrecognizedEssenceLines,
+            IReadOnlyList<string>? unresolvedTypes = null)
+        {
+            IsValid = isValid;
+            IsCorrupted = isCorrupted;
+            Essences = essences;
+            UnrecognizedEssenceLines = unrecognizedEssenceLines;
+            UnresolvedTypes = unresolvedTypes ?? [];
+        }
+
         /// <summary>Indicates whether the analysis was successful (valid label structure)</summary>
-        public bool IsValid { get; set; }
+        public bool IsValid { get; }
 
-        /// <summary>True if the essence has already been corrupted by the game (cannot be corrupted again)</summary>
-        public bool IsCorrupted { get; set; }
+        /// <summary>True if the monster is already corrupted (a monster can only be corrupted once)</summary>
+        public bool IsCorrupted { get; }
 
-        /// <summary>True if the essence contains MEDS essences (Misery, Envy, Dread, Scorn)</summary>
-        public bool HasMeds { get; set; }
+        /// <summary>Essences matched to the catalogue, in label order</summary>
+        public IReadOnlyList<EssenceEntry> Essences { get; }
 
-        /// <summary>Total number of essences in the monolith (sum of all tiers)</summary>
-        public int EssenceCount { get; set; }
-
-        /// <summary>Number of Screaming-tier essences (tier 5 of 7)</summary>
-        public int ScreamingCount { get; set; }
-
-        /// <summary>Number of Shrieking-tier essences (tier 6 of 7)</summary>
-        public int ShriekingCount { get; set; }
-
-        /// <summary>Number of Deafening-tier essences (tier 7 of 7)</summary>
-        public int DeafeningCount { get; set; }
+        /// <summary>Label lines that look like essences ("Essence of ...") but match no catalogue entry</summary>
+        public IReadOnlyList<string> UnrecognizedEssenceLines { get; }
 
         /// <summary>
-        /// True if the essence has a valuable pattern worth corrupting.
-        /// Determined by: MEDS essences OR 6+ total essences.
+        /// Known essence types (e.g. "Misery") read from <see cref="UnrecognizedEssenceLines"/> whose tier
+        /// couldn't be resolved - so an unexpected tier word doesn't hide a MEDS essence.
         /// </summary>
-        public bool HasValuablePattern { get; set; }
+        public IReadOnlyList<string> UnresolvedTypes { get; }
+
+        /// <summary>Total number of essences on the monster, recognised or not</summary>
+        public int EssenceCount => Essences.Count + UnrecognizedEssenceLines.Count;
+
+        public bool HasMeds => Essences.Any(e => e.IsMeds) || UnresolvedTypes.Any(t => EssenceCatalogue.GroupOf(t) == EssenceGroup.E);
+
+        public int CountTier(EssenceTier tier) => Essences.Count(e => e.Tier == tier);
+
+        /// <summary>Same essences (in any order) and corruption state - i.e. nothing worth re-evaluating changed.</summary>
+        public bool SameContentAs(EssenceAnalysis other)
+        {
+            if (IsValid != other.IsValid || IsCorrupted != other.IsCorrupted ||
+                Essences.Count != other.Essences.Count ||
+                UnrecognizedEssenceLines.Count != other.UnrecognizedEssenceLines.Count)
+                return false;
+
+            return Essences.OrderBy(e => e.Name).SequenceEqual(other.Essences.OrderBy(e => e.Name)) &&
+                   UnrecognizedEssenceLines.OrderBy(l => l).SequenceEqual(other.UnrecognizedEssenceLines.OrderBy(l => l));
+        }
     }
 }
