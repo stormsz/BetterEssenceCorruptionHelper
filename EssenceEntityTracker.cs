@@ -39,10 +39,12 @@ namespace BetterEssenceCorruptionHelper
     /// a portal, is recognised as the same one.
     /// </para>
     /// <para>
-    /// A kill is only counted for the essence monster itself, once it has been seen free and then dies.
-    /// Breaking the monolith can replace the trapped entity with a new one, so the trapped entity going
-    /// away (or reading dead) on release is not a kill: the freed monster is found again next to the
-    /// monolith by its metadata path and rarity, and that one is watched.
+    /// A kill is only counted for the essence monster itself, once it has been seen free and then dies,
+    /// wherever in the map that happens: it is followed by entity ID, not position. The only positional
+    /// step is pairing a monolith with the frozen monster inside it. Breaking the monolith can replace
+    /// the trapped entity with a new one, so the trapped entity going away (or reading dead) on release
+    /// is not a kill: the freed monster is recognised anywhere in the loaded area by the trapped one's
+    /// essence mods and rarity, and that one is followed instead.
     /// </para>
     /// </remarks>
     /// <param name="gameController">The game controller instance</param>
@@ -90,17 +92,17 @@ namespace BetterEssenceCorruptionHelper
         /// <summary>Max grid distance between a monolith and the trapped monster linked to it</summary>
         private const float MONSTER_LINK_RADIUS = 15f;
 
-        /// <summary>Max grid distance between a monolith and the freed monster linked to it after release</summary>
-        private const float FREED_LINK_RADIUS = 30f;
-
-        /// <summary>How long after release the freed monster is looked for next to the monolith, ms</summary>
-        private const int FREED_LINK_WINDOW_MS = 10000;
-
         /// <summary>
-        /// For this long after release only a monster of the trapped one's kind (same metadata path) is
-        /// linked as the freed monster; after it, any rare next to the monolith will do. ms
+        /// If the trapped entity is replaced on release, the freed monster is looked for on every monster
+        /// pass for this long, then every <see cref="FREED_SLOW_SEARCH_MS"/> until found. ms
         /// </summary>
-        private const int FREED_PATH_ONLY_MS = 1000;
+        private const int FREED_FAST_SEARCH_MS = 10000;
+
+        /// <summary>Interval of the freed-monster search after <see cref="FREED_FAST_SEARCH_MS"/>, ms</summary>
+        private const int FREED_SLOW_SEARCH_MS = 1000;
+
+        /// <summary>How often the trapped monster's identity (mods) is re-read - a Vaal Orb changes them. ms</summary>
+        private const int IDENTITY_REFRESH_MS = 500;
 
         /// <summary>
         /// How long a freed monster must be missing from the entity list before its disappearance is
@@ -171,14 +173,15 @@ namespace BetterEssenceCorruptionHelper
         private readonly HashSet<uint> _leftoverMonsters = new();
 
         /// <summary>
-        /// A monster that may be an essence's monster. Ranked: same metadata path as the trapped monster
-        /// first (after release), then highest rarity (the essence monster is rare, the pack around it
-        /// white or magic), then closest to the monolith.
+        /// A monster that may be an essence's monster. Ranked: <see cref="MonsterCandidate.Match"/> first
+        /// (trapped: carries essence mods; freed: also has the trapped monster's name), then highest
+        /// rarity (the essence monster is rare, the pack around it white or magic), then closest to the
+        /// monolith (trapped only).
         /// </summary>
-        private readonly record struct MonsterCandidate(Entity? Monster, bool PathMatch, int Rarity, float Distance)
+        private readonly record struct MonsterCandidate(Entity? Monster, int Match, int Rarity, float Distance, string? Mods)
         {
             public bool IsBetterThan(MonsterCandidate other) =>
-                PathMatch != other.PathMatch ? PathMatch :
+                Match != other.Match ? Match > other.Match :
                 Rarity != other.Rarity ? Rarity > other.Rarity :
                 Distance < other.Distance;
         }
@@ -188,6 +191,7 @@ namespace BetterEssenceCorruptionHelper
 
         private long _nextSeedMs;
         private long _nextMonsterPassMs;
+        private long _nextSlowFreedSearchMs;
         private long _nextLabelScanMs;
         private long _nextSafetyLabelScanMs;
         private bool _seededThisArea;
@@ -702,7 +706,7 @@ namespace BetterEssenceCorruptionHelper
             if (!newAnalysis.IsValid && previous.IsValid)
                 return;
 
-            var oldState = data.State;
+            var shownState = data.State;
 
             // Commit the new reading first, so a failure while handling a corruption below can't make
             // the next read see "uncorrupted -> corrupted" again and count it twice.
@@ -729,7 +733,7 @@ namespace BetterEssenceCorruptionHelper
                     data.Analysis = newAnalysis;
                 }
 
-                HandleEssenceCorruption(data, previous, newAnalysis, oldState);
+                HandleEssenceCorruption(data, previous, newAnalysis, shownState);
             }
 
             ApplyRecommendation(data, StrategyEvaluator.Evaluate(data.Analysis, _settings.Tracking, CurrentProfitContext()));
@@ -748,17 +752,17 @@ namespace BetterEssenceCorruptionHelper
         /// <summary>
         /// Handles essence corruption event. Staged as pending on the entity, committed only when the monster is killed.
         /// </summary>
-        private void HandleEssenceCorruption(EssenceEntityData data, EssenceAnalysis before, EssenceAnalysis after, EssenceState oldState)
+        /// <param name="data">The corrupted essence</param>
+        /// <param name="before">Its contents before the Vaal Orb</param>
+        /// <param name="after">Its contents after</param>
+        /// <param name="shownState">The recommendation on screen when it was corrupted</param>
+        private void HandleEssenceCorruption(EssenceEntityData data, EssenceAnalysis before, EssenceAnalysis after, EssenceState shownState)
         {
-            data.WasCorruptedByPlayer = true;
-            data.PreviousAnalysis = before; // pre-corruption state for the debug comparison
+            var wasRecommended = shownState == EssenceState.ShouldCorrupt;
+            data.Corruption = new CorruptionObservation(before, after, wasRecommended);
 
-            if (oldState == EssenceState.None && before.IsValid)
-                oldState = StrategyEvaluator.Evaluate(before, _settings.Tracking, CurrentProfitContext()).State;
-
-            var wasRecommended = oldState == EssenceState.ShouldCorrupt;
-            data.PendingCorruption = new PendingCorruptionOutcome(before, after, wasRecommended);
-            data.PendingMissed = false;
+            // The essences changed, and with them the trapped monster's mods: re-read its identity.
+            data.MonsterIdentityReadMs = long.MinValue;
 
             if (DiagnosticsOn)
             {
@@ -822,31 +826,30 @@ namespace BetterEssenceCorruptionHelper
         /// <summary>
         /// Processes the monolith being opened: the monster is released and the chance to corrupt
         /// is gone, so a missed corruption is judged here. The kill itself is only counted once the
-        /// freed monster dies (see <see cref="UpdateLinkedMonster"/>).
+        /// freed monster dies, wherever that happens (see <see cref="UpdateLinkedMonster"/>).
         /// </summary>
         /// <param name="data">The essence whose monolith opened</param>
         /// <param name="now">Tracker clock (ms)</param>
         /// <param name="observed">
         /// False when the monolith was already open the first time it was read after loading back in
-        /// (opened by someone else, or while we were away): nothing is judged and the freed monster is
-        /// not looked for, as it could be anywhere by now.
+        /// (opened by someone else, or while it was unloaded): it isn't judged as a missed corruption.
         /// </param>
         private void HandleEssenceOpened(EssenceEntityData data, long now, bool observed)
         {
             if (data.IsOpened)
                 return;
 
-            data.IsOpened = true;
-            data.OpenedAtMs = observed ? now : long.MinValue / 2;
+            data.Phase = EssencePhase.Released;
+            data.OpenedAtMs = now;
 
             if (!observed)
             {
                 if (DiagnosticsOn)
-                    LogDiagnostic($"#{data.EntityId} id={data.Id}: found opened after loading back in - not judged, kill can't be counted");
+                    LogDiagnostic($"#{data.EntityId} id={data.Id}: found opened after loading back in - not judged as missed");
             }
-            else if (IsMissedCorruption(data)) // must run before State is cleared
+            else if (IsMissedCorruption(data))
             {
-                data.PendingMissed = true;
+                data.Missed = true;
                 if (DiagnosticsOn)
                     DebugWindow.LogMsg($"MISSED CORRUPTION: Essence {data.EntityId} (id={data.Id}) opened uncorrupted (pending kill)", 3, SharpDX.Color.Orange);
             }
@@ -855,8 +858,10 @@ namespace BetterEssenceCorruptionHelper
                 DebugWindow.LogMsg($"Essence {data.EntityId} released", 3, SharpDX.Color.Cyan);
             }
 
-            // Nothing left to draw for an opened monolith.
-            data.State = EssenceState.None;
+            if (!data.HasMonsterIdentity && DiagnosticsOn)
+                LogDiagnostic($"#{data.EntityId} id={data.Id}: released before its trapped monster was linked - the freed monster can only be followed if it is the same entity");
+
+            // Nothing left to draw for an opened monolith. State keeps the last recommendation.
             data.Label = null;
         }
 
@@ -870,9 +875,13 @@ namespace BetterEssenceCorruptionHelper
             _seekingFreed.Clear();
             _bestCandidates.Clear();
 
+            var slowSearchDue = now >= _nextSlowFreedSearchMs;
+            if (slowSearchDue)
+                _nextSlowFreedSearchMs = now + FREED_SLOW_SEARCH_MS;
+
             foreach (var data in _session.Essences.Values)
             {
-                if (data.MonsterKilled || data.GridPos == null)
+                if (data.MonsterKilled)
                     continue;
 
                 if (data.MonsterId != null)
@@ -884,11 +893,13 @@ namespace BetterEssenceCorruptionHelper
 
                 if (!data.IsOpened)
                 {
-                    // Keep looking until the trapped rare is linked; a white or magic add may be linked first.
-                    if (data.IsLoaded && (data.MonsterId == null || data.MonsterRarityRank < (int)MonsterRarity.Rare))
+                    // Keep looking until the essence monster itself is linked: the adds trapped with it
+                    // may be linked first.
+                    if (data.IsLoaded && data.GridPos != null && !IsEssenceMonsterLinked(data))
                         _seekingTrapped.Add(data);
                 }
-                else if (!data.MonsterFreed && now - data.OpenedAtMs <= FREED_LINK_WINDOW_MS)
+                else if (!data.MonsterFreed && data.HasMonsterIdentity &&
+                         (now - data.OpenedAtMs <= FREED_FAST_SEARCH_MS || slowSearchDue))
                 {
                     _seekingFreed.Add(data);
                 }
@@ -909,6 +920,10 @@ namespace BetterEssenceCorruptionHelper
             ApplyBestMonsterLinks(now, diagnostics);
         }
 
+        /// <summary>The linked trapped monster is the essence monster: it carries essence mods, or is at least rare.</summary>
+        private static bool IsEssenceMonsterLinked(EssenceEntityData data) =>
+            data.MonsterId != null && (!string.IsNullOrEmpty(data.MonsterEssenceMods) || data.MonsterRarityRank >= (int)MonsterRarity.Rare);
+
         /// <summary>Monsters only, from ExileCore's per-type index; the full entity list if that is unavailable.</summary>
         private IEnumerable<Entity> MonsterEntities()
         {
@@ -920,10 +935,11 @@ namespace BetterEssenceCorruptionHelper
         }
 
         /// <summary>
-        /// Follows an essence's linked monster. Before release there is nothing to watch: a trapped
-        /// monster can't be damaged. After release the linked monster has to be seen alive and free
-        /// before its death counts - the trapped entity may be replaced by a new one when the monolith
-        /// breaks, and that leftover reading dead or disappearing is not a kill.
+        /// Follows an essence's linked monster by ID, wherever it is in the map. Before release there
+        /// is nothing to watch (a trapped monster can't be damaged) beyond keeping its identity current,
+        /// as a Vaal Orb changes its mods. After release the linked monster has to be seen alive and
+        /// free before its death counts - the trapped entity may be replaced by a new one when the
+        /// monolith breaks, and that leftover reading dead or disappearing is not a kill.
         /// </summary>
         private void UpdateLinkedMonster(EssenceEntityData data, long now, bool diagnostics)
         {
@@ -939,7 +955,11 @@ namespace BetterEssenceCorruptionHelper
             data.MonsterLastDistance = monster.DistancePlayer;
 
             if (!data.IsOpened)
+            {
+                if (now - data.MonsterIdentityReadMs >= IDENTITY_REFRESH_MS)
+                    RecordIdentity(data, monster, now);
                 return;
+            }
 
             var deathSignal = GetDeathSignal(monster);
             if (!data.MonsterFreed)
@@ -951,7 +971,7 @@ namespace BetterEssenceCorruptionHelper
                     if (diagnostics)
                         LogDiagnostic($"#{data.EntityId} id={data.Id}: trapped monster id={id} is the freed monster");
                 }
-                else if (deathSignal != null || now - data.OpenedAtMs > FREED_LINK_WINDOW_MS)
+                else if (deathSignal != null || now - data.OpenedAtMs > FREED_FAST_SEARCH_MS)
                 {
                     // Dead the moment it was freed, or still imprisoned long after release: the trapped
                     // entity was left behind and the freed monster is another one.
@@ -974,7 +994,8 @@ namespace BetterEssenceCorruptionHelper
         /// release): drop the link so it gets made again - this is how an ID change on corruption or
         /// release is followed. Freed: if it stays missing past the grace period, was damaged and was
         /// last seen close to the player, it died without leaving a corpse; otherwise it just left the
-        /// loaded area and keeps its link (same ID when it comes back).
+        /// loaded area (you ran off, or it chased you elsewhere) and keeps its link - same ID when it
+        /// comes back.
         /// </summary>
         private void HandleMissingMonster(EssenceEntityData data, uint id, long now, bool diagnostics)
         {
@@ -1049,33 +1070,70 @@ namespace BetterEssenceCorruptionHelper
         }
 
         /// <summary>
-        /// Offers a monster to the nearest essence looking for one. Before release: one of the
-        /// monolith's prisoners (standing on it, MonsterInsideMonolith stat). After release: an alive,
-        /// hostile, free monster next to the monolith that is the trapped one's kind (same metadata
-        /// path) or at least rare. The best candidate per essence is linked at the end of the pass.
+        /// Offers a monster to the essences looking for one.
+        ///
+        /// Trapped: the frozen monster is the monolith, so it stands on it - the nearest monolith within
+        /// <see cref="MONSTER_LINK_RADIUS"/>, carrying the MonsterInsideMonolith stat. Position only
+        /// pairs it with its monolith here; from then on it is followed by ID.
+        ///
+        /// Freed (only when the trapped entity was replaced on release): recognised anywhere in the
+        /// loaded area by the trapped monster's identity - same essence mods (or, if those couldn't be
+        /// read, the same metadata path and name) and rarity - never by where it stands.
         /// </summary>
         private void ConsiderCandidate(Entity monster)
         {
-            var position = monster.GridPosNum;
-
             // Distance first because it is cheap; the stats are only read for a monster standing
             // on a monolith.
             if (_seekingTrapped.Count > 0 &&
-                FindNearest(_seekingTrapped, position, MONSTER_LINK_RADIUS, out var trapped, out var trappedDistance) &&
+                FindNearest(_seekingTrapped, monster.GridPosNum, MONSTER_LINK_RADIUS, out var trapped, out var trappedDistance) &&
                 IsImprisoned(monster, useCache: true) == true)
             {
-                Offer(trapped, new MonsterCandidate(monster, false, RarityRank(monster), trappedDistance));
+                var mods = ReadEssenceMods(monster);
+                Offer(trapped, new MonsterCandidate(monster, string.IsNullOrEmpty(mods) ? 0 : 1, RarityRank(monster), trappedDistance, mods));
             }
 
-            if (_seekingFreed.Count > 0 && !_leftoverMonsters.Contains(monster.Id) &&
-                FindNearest(_seekingFreed, position, FREED_LINK_RADIUS, out var freed, out var freedDistance) &&
-                monster.IsAlive && monster.IsHostile && IsImprisoned(monster, useCache: false) == false)
+            if (_seekingFreed.Count > 0 && !_leftoverMonsters.Contains(monster.Id))
             {
-                var rank = RarityRank(monster);
-                var pathMatch = freed.MonsterPath != null && monster.Path == freed.MonsterPath;
-                if (pathMatch || rank >= (int)MonsterRarity.Rare)
-                    Offer(freed, new MonsterCandidate(monster, pathMatch, rank, freedDistance));
+                foreach (var data in _seekingFreed)
+                {
+                    if (MatchFreedMonster(data, monster) is { } candidate)
+                        Offer(data, candidate);
+                }
             }
+        }
+
+        /// <summary>
+        /// The monster as a candidate for this essence's freed monster, or null if it isn't one. Cheap
+        /// cached reads first (rarity, path); mods and stats only for a monster that passed them.
+        /// </summary>
+        private MonsterCandidate? MatchFreedMonster(EssenceEntityData data, Entity monster)
+        {
+            var rank = RarityRank(monster);
+            if (rank != data.MonsterRarityRank)
+                return null;
+
+            string? mods = null;
+            if (!string.IsNullOrEmpty(data.MonsterEssenceMods))
+            {
+                mods = ReadEssenceMods(monster);
+                if (mods != data.MonsterEssenceMods)
+                    return null;
+            }
+            else if (monster.Path != data.MonsterPath)
+            {
+                return null;
+            }
+
+            var sameName = monster.RenderName == data.MonsterRenderName;
+            if (mods == null && !sameName)
+                return null; // without a mod fingerprint, path alone is not enough
+
+            if (!monster.IsAlive || !monster.IsHostile || IsImprisoned(monster, useCache: false) != false)
+                return null;
+
+            // Same mods and same rare name is the strongest match; the name breaks a tie between two
+            // essences holding the same essences.
+            return new MonsterCandidate(monster, sameName ? 1 : 0, rank, 0f, mods);
         }
 
         private static bool FindNearest(List<EssenceEntityData> essences, Vector2 position, float radius,
@@ -1105,27 +1163,23 @@ namespace BetterEssenceCorruptionHelper
         /// <summary>
         /// Links each essence to the best monster seen for it this pass. A trapped link is replaced
         /// only by a higher-ranked prisoner, so an add that happened to be linked first is swapped out
-        /// as soon as the rare essence monster is seen. After release any free candidate replaces an
-        /// unconfirmed link - that link is the trapped entity, which hasn't shown itself free.
+        /// as soon as the essence monster is seen. After release a recognised freed monster replaces
+        /// an unconfirmed link - that link is the trapped entity, which hasn't shown itself free.
         /// </summary>
         private void ApplyBestMonsterLinks(long now, bool diagnostics)
         {
             foreach (var (essenceId, candidate) in _bestCandidates)
             {
                 var monster = candidate.Monster!;
-                if (!_session.Essences.TryGetValue(essenceId, out var data) || data.MonsterId == monster.Id)
-                    continue;
-
-                // After release, a monster of another kind is only taken once none of the trapped one's
-                // kind showed up, and never over the trapped entity itself.
-                if (data.IsOpened && data.MonsterPath != null && !candidate.PathMatch &&
-                    (data.MonsterId != null || now - data.OpenedAtMs < FREED_PATH_ONLY_MS))
+                if (!_session.Essences.TryGetValue(essenceId, out var data) || data.MonsterId == monster.Id ||
+                    _session.ByMonsterId.ContainsKey(monster.Id))
                     continue;
 
                 var previous = data.MonsterId;
                 if (previous != null)
                 {
-                    if (!data.IsOpened && !candidate.IsBetterThan(new MonsterCandidate(null, false, data.MonsterRarityRank, data.MonsterLinkDistance)))
+                    var current = new MonsterCandidate(null, string.IsNullOrEmpty(data.MonsterEssenceMods) ? 0 : 1, data.MonsterRarityRank, data.MonsterLinkDistance, null);
+                    if (!data.IsOpened && !candidate.IsBetterThan(current))
                         continue;
 
                     _session.ByMonsterId.Remove(previous.Value);
@@ -1135,7 +1189,6 @@ namespace BetterEssenceCorruptionHelper
 
                 data.MonsterId = monster.Id;
                 data.Monster = monster;
-                data.MonsterRarityRank = candidate.Rarity;
                 data.MonsterLinkDistance = candidate.Distance;
                 data.MonsterMissingSinceMs = null;
                 data.MonsterLastDistance = monster.DistancePlayer;
@@ -1143,25 +1196,85 @@ namespace BetterEssenceCorruptionHelper
 
                 if (data.IsOpened)
                 {
-                    // Candidates after release are alive and free by construction.
+                    // Freed candidates are alive and free by construction; the trapped identity stays.
                     data.MonsterFreed = true;
                     data.MonsterLastHpFraction = HpFraction(monster);
-                    data.MonsterPath ??= monster.Path;
                 }
                 else
                 {
-                    data.MonsterPath = monster.Path;
+                    RecordIdentity(data, monster, now, candidate.Mods);
                 }
 
                 if (diagnostics)
                 {
                     LogDiagnostic($"#{data.EntityId} id={data.Id}: linked {(data.IsOpened ? "freed" : "trapped")} monster id={monster.Id} " +
-                                  $"({monster.RenderName}, {RarityName(candidate.Rarity)}, {candidate.Distance:F1} grid away" +
-                                  (data.IsOpened ? $", path {(candidate.PathMatch ? "matches" : "differs from")} the trapped one)" : ")") +
+                                  $"({monster.RenderName}, {RarityName(candidate.Rarity)}, {DescribeMods(candidate.Mods)}" +
+                                  (data.IsOpened ? ")" : $", {candidate.Distance:F1} grid from the monolith)") +
                                   (previous != null ? $", replacing id={previous}" : ""));
                 }
             }
         }
+
+        /// <summary>
+        /// Remembers who the trapped monster is, so the freed one can be recognised if the game
+        /// replaces the entity on release. A failed mod read keeps the last good fingerprint.
+        /// </summary>
+        private static void RecordIdentity(EssenceEntityData data, Entity monster, long now, string? mods = null)
+        {
+            data.MonsterPath = monster.Path;
+            data.MonsterRenderName = monster.RenderName;
+            data.MonsterRarityRank = RarityRank(monster);
+            data.MonsterEssenceMods = mods ?? ReadEssenceMods(monster) ?? data.MonsterEssenceMods;
+            data.MonsterIdentityReadMs = now;
+        }
+
+        /// <summary>
+        /// The monster's essence mods (see <see cref="IsEssenceMonsterMod"/>), sorted and comma-joined:
+        /// "" when it has none, null when they can't be read.
+        /// </summary>
+        private static string? ReadEssenceMods(Entity monster)
+        {
+            try
+            {
+                if (!monster.TryGetComponent<ObjectMagicProperties>(out var magic) || magic?.Mods is not { } mods)
+                    return null;
+
+                List<string>? essenceMods = null;
+                foreach (var mod in mods)
+                {
+                    if (IsEssenceMonsterMod(mod))
+                        (essenceMods ??= []).Add(mod);
+                }
+
+                if (essenceMods == null)
+                    return "";
+
+                essenceMods.Sort(StringComparer.Ordinal);
+                return string.Join(",", essenceMods);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Whether a monster mod ID is one the essence monster gets from the essences it holds. In the
+        /// game data those are the "Essence..." mods (e.g. EssenceDaemonModLifeAndDamageLevel3) plus
+        /// the Remnant of Corruption ones; the pack around the monolith carries
+        /// "MonsterSupporterEssence..." mods instead, which don't identify the essence monster.
+        /// </summary>
+        internal static bool IsEssenceMonsterMod(string? mod) =>
+            !string.IsNullOrEmpty(mod) &&
+            (mod.StartsWith("RemnantOfCorruption", StringComparison.Ordinal) ||
+             (mod.Contains("Essence", StringComparison.Ordinal) && !mod.StartsWith("MonsterSupporter", StringComparison.Ordinal)));
+
+        private static string DescribeMods(string? mods) => mods switch
+        {
+            null => "mods unreadable",
+            "" => "no essence mods",
+            _ => $"mods {mods}",
+        };
 
         /// <summary>
         /// Whether the monster is still imprisoned in a monolith (MonsterInsideMonolith stat). Reads
@@ -1210,16 +1323,15 @@ namespace BetterEssenceCorruptionHelper
         internal static string RarityName(int rank) =>
             rank is >= 0 and <= (int)MonsterRarity.Unique ? ((MonsterRarity)rank).ToString() : "unknown rarity";
 
-        /// <summary>The freed essence monster died - this is the "killed" event.</summary>
+        /// <summary>The freed essence monster died - this is the "killed" event, and when its outcome is counted.</summary>
         private void HandleMonsterKilled(EssenceEntityData data, string signal)
         {
-            data.MonsterKilled = true;
+            data.Phase = EssencePhase.Killed;
             var stats = _session.Stats;
 
-            // Commit pending corruption or missed outcome now that the monster is confirmed dead
-            if (data.PendingCorruption is { } pending)
+            if (data.Corruption is { } corruption)
             {
-                if (pending.WasRecommended)
+                if (corruption.WasRecommended)
                 {
                     stats.IncrementCorrupted();
                     if (DiagnosticsOn)
@@ -1232,16 +1344,14 @@ namespace BetterEssenceCorruptionHelper
                         DebugWindow.LogMsg($"MISTAKEN CORRUPTION CONFIRMED: Essence {data.EntityId} killed", 3, SharpDX.Color.OrangeRed);
                 }
 
-                RecordOutcome(data, pending.Before, pending.After, pending.WasRecommended);
-                data.PendingCorruption = null;
+                RecordOutcome(data, corruption.Before, corruption.After, corruption.WasRecommended);
             }
-            else if (data.PendingMissed)
+            else if (data.Missed)
             {
                 stats.IncrementMissed();
                 _corruptionLog.RecordMissed();
                 if (DiagnosticsOn)
                     DebugWindow.LogMsg($"MISSED CORRUPTION CONFIRMED: Essence {data.EntityId} killed without corrupting", 3, SharpDX.Color.Orange);
-                data.PendingMissed = false;
             }
 
             stats.IncrementKilled();
@@ -1251,20 +1361,9 @@ namespace BetterEssenceCorruptionHelper
                 DebugWindow.LogMsg($"Essence {data.EntityId}: monster id={data.MonsterId} killed ({signal})", 3, SharpDX.Color.Cyan);
         }
 
-        /// <summary>
-        /// Checks if player missed a corruption opportunity.
-        /// </summary>
-        private bool IsMissedCorruption(EssenceEntityData data)
-        {
-            if (data.WasCorruptedByPlayer || data.Analysis.IsCorrupted)
-                return false;
-
-            var state = data.State;
-            if (state == EssenceState.None && data.Analysis.IsValid)
-                state = StrategyEvaluator.Evaluate(data.Analysis, _settings.Tracking, CurrentProfitContext()).State;
-
-            return state == EssenceState.ShouldCorrupt;
-        }
+        /// <summary>Released uncorrupted while the recommendation on screen was CORRUPT.</summary>
+        private static bool IsMissedCorruption(EssenceEntityData data) =>
+            data.Corruption == null && !data.Analysis.IsCorrupted && data.State == EssenceState.ShouldCorrupt;
 
         #endregion
 

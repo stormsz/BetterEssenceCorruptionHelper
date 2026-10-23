@@ -4,10 +4,21 @@ using Vector2 = System.Numerics.Vector2;
 
 namespace BetterEssenceCorruptionHelper.Models
 {
-    /// <summary>
-    /// Pending corruption outcome staged when corrupted, committed only when the monster is killed.
-    /// </summary>
-    internal sealed record PendingCorruptionOutcome(
+    /// <summary>Where an essence is in its life: trapped in the monolith, released and fighting, or dead.</summary>
+    internal enum EssencePhase
+    {
+        /// <summary>Monster still trapped; the label can be read and the monster corrupted.</summary>
+        Trapped,
+
+        /// <summary>Monolith opened: the monster is free and its kill is awaited, wherever it happens.</summary>
+        Released,
+
+        /// <summary>The freed monster died; the kill and its outcome have been counted.</summary>
+        Killed,
+    }
+
+    /// <summary>A Vaal Orb used on the trapped monster: its contents before and after, and whether the strategy wanted it.</summary>
+    internal sealed record CorruptionObservation(
         EssenceAnalysis Before,
         EssenceAnalysis After,
         bool WasRecommended);
@@ -36,15 +47,6 @@ namespace BetterEssenceCorruptionHelper.Models
         /// <summary>Current analysis of essence value</summary>
         public EssenceAnalysis Analysis { get; set; } = EssenceAnalysis.Invalid;
 
-        /// <summary>Analysis before corruption (for comparison)</summary>
-        public EssenceAnalysis? PreviousAnalysis { get; set; }
-
-        /// <summary>Pending corruption outcome, committed only when the released monster dies.</summary>
-        public PendingCorruptionOutcome? PendingCorruption { get; set; }
-
-        /// <summary>Pending missed corruption, committed only when the released monster dies.</summary>
-        public bool PendingMissed { get; set; }
-
         /// <summary>Bumped whenever <see cref="Analysis"/> changes content, so cached derived values refresh</summary>
         public int AnalysisVersion { get; set; }
 
@@ -54,11 +56,29 @@ namespace BetterEssenceCorruptionHelper.Models
         /// <summary>Tracker clock (ms) of the last label analysis</summary>
         public long LastAnalysisMs { get; set; } = long.MinValue;
 
-        /// <summary>Current state (should corrupt, should kill)</summary>
+        /// <summary>
+        /// What the strategy recommends for the trapped monster (drives the CORRUPT / KILL indicator).
+        /// Kept after release, as the decision the player was shown.
+        /// </summary>
         public EssenceState State { get; set; } = EssenceState.None;
 
         /// <summary>Why <see cref="State"/> was chosen (debug overlay)</summary>
         public string StateReason { get; set; } = "";
+
+        /// <summary>Lifecycle: trapped, released, killed.</summary>
+        public EssencePhase Phase { get; set; } = EssencePhase.Trapped;
+
+        /// <summary>True once the monolith has been opened (monster released or already dead).</summary>
+        public bool IsOpened => Phase != EssencePhase.Trapped;
+
+        /// <summary>True once the freed monster has been seen dead - that is when the kill is counted.</summary>
+        public bool MonsterKilled => Phase == EssencePhase.Killed;
+
+        /// <summary>The player's Vaal Orb on this monster, or null if it wasn't corrupted by the player. Counted at the kill.</summary>
+        public CorruptionObservation? Corruption { get; set; }
+
+        /// <summary>Released uncorrupted although the strategy said corrupt. Counted at the kill.</summary>
+        public bool Missed { get; set; }
 
         /// <summary>True while the monolith entity is in the loaded entity list (EntityAdded/EntityRemoved)</summary>
         public bool IsLoaded { get; set; } = true;
@@ -81,13 +101,7 @@ namespace BetterEssenceCorruptionHelper.Models
         /// <summary>Indicator text for <see cref="Assessment"/> (built with it, not per frame)</summary>
         public string? ValueText { get; set; }
 
-        /// <summary>
-        /// True once the monolith has been opened (monster released). A missed corruption is judged
-        /// at that point; the kill is only counted later, when the released monster dies.
-        /// </summary>
-        public bool IsOpened { get; set; }
-
-        /// <summary>Tracker clock (ms) when the monolith was opened, to bound the search for the freed monster</summary>
+        /// <summary>Tracker clock (ms) when the monolith was opened</summary>
         public long OpenedAtMs { get; set; }
 
         /// <summary>Grid position of the monolith - where its trapped monster sits - for linking the two</summary>
@@ -95,22 +109,38 @@ namespace BetterEssenceCorruptionHelper.Models
 
         /// <summary>
         /// Entity ID of the essence monster linked to this monolith: the trapped one before release,
-        /// the freed one after. They are not always the same entity - breaking the monolith can
-        /// replace the trapped entity with a new one - so the link is re-made after release.
+        /// the freed one after, followed by ID wherever it goes. They are not always the same entity -
+        /// breaking the monolith can replace the trapped entity with a new one - so the freed one is
+        /// then recognised by the trapped one's identity (<see cref="MonsterEssenceMods"/> etc.).
         /// </summary>
         public uint? MonsterId { get; set; }
 
         /// <summary>Linked monster entity while loaded, null while unloaded</summary>
         public Entity? Monster { get; set; }
 
-        /// <summary>Metadata path of the trapped monster, kept after unlinking to recognise the freed one</summary>
+        /// <summary>Metadata path of the trapped monster (kept after unlinking, to recognise the freed one)</summary>
         public string? MonsterPath { get; set; }
+
+        /// <summary>Name of the trapped monster - a rare's random name (kept after unlinking)</summary>
+        public string? MonsterRenderName { get; set; }
+
+        /// <summary>
+        /// The trapped monster's essence mod IDs, sorted and comma-joined: its fingerprint, as the mods
+        /// follow the essences it holds. "" when it has none, null when never read.
+        /// </summary>
+        public string? MonsterEssenceMods { get; set; }
+
+        /// <summary>Tracker clock (ms) of the last identity read of the trapped monster (mods change on corruption)</summary>
+        public long MonsterIdentityReadMs { get; set; } = long.MinValue;
 
         /// <summary>Rarity rank of the linked monster when linked (White 0 .. Unique 3, -1 unknown), to compare candidates</summary>
         public int MonsterRarityRank { get; set; } = -1;
 
         /// <summary>Grid distance between the linked monster and the monolith when linked, to compare candidates</summary>
         public float MonsterLinkDistance { get; set; }
+
+        /// <summary>True once the trapped monster's identity is known, so the freed monster can be recognised</summary>
+        public bool HasMonsterIdentity => MonsterPath != null;
 
         /// <summary>
         /// True once the linked monster has been seen alive and no longer imprisoned after release.
@@ -119,16 +149,13 @@ namespace BetterEssenceCorruptionHelper.Models
         /// </summary>
         public bool MonsterFreed { get; set; }
 
-        /// <summary>True once the released monster has been seen dead - that is when the kill is counted</summary>
-        public bool MonsterKilled { get; set; }
-
         /// <summary>Grid distance from the player when the linked monster was last seen (MaxValue until seen in this visit)</summary>
         public float MonsterLastDistance { get; set; } = float.MaxValue;
 
-        /// <summary>Life fraction (0..1) when the linked monster was last seen, 1 if unreadable</summary>
+        /// <summary>Life plus energy shield fraction (0..1) when the linked monster was last seen, 1 if unreadable</summary>
         public float MonsterLastHpFraction { get; set; } = 1f;
 
-        /// <summary>Tracker clock (ms) when the released monster went missing from the scan, or null while present</summary>
+        /// <summary>Tracker clock (ms) when the freed monster went missing from the scan, or null while present</summary>
         public long? MonsterMissingSinceMs { get; set; }
 
         /// <summary>Last monster snapshot written to the diagnostics log, to only log changes</summary>
@@ -139,11 +166,5 @@ namespace BetterEssenceCorruptionHelper.Models
 
         /// <summary>Cheap key of the inputs to <see cref="LastDiagnostic"/>, so the text is only rebuilt on change</summary>
         public int LastDiagnosticKey { get; set; }
-
-        /// <summary>
-        /// True if player corrupted this essence. Read by the debug overlay to decide whether to
-        /// show the before/after comparison.
-        /// </summary>
-        public bool WasCorruptedByPlayer { get; set; }
     }
 }

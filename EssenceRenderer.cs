@@ -329,7 +329,7 @@ namespace BetterEssenceCorruptionHelper
         {
             var assessment = GetAssessment(data);
 
-            var key = System.HashCode.Combine(data.AnalysisVersion, data.State, data.MonsterId, data.WasCorruptedByPlayer,
+            var key = System.HashCode.Combine(data.AnalysisVersion, data.State, data.MonsterId, data.Corruption != null,
                 data.AssessmentKey, data.StateReason, (int)(data.GridPos?.X ?? 0), (int)(data.GridPos?.Y ?? 0));
             if (!_debugCache.TryGetValue(data.Id, out var cached) || cached.Key != key)
             {
@@ -607,7 +607,7 @@ namespace BetterEssenceCorruptionHelper
                 ($" ({data.StateReason})", Color.Gray)
             };
 
-            if (data.WasCorruptedByPlayer)
+            if (data.Corruption != null)
                 header.Add((" [Corrupted]", Color.Yellow));
 
             lines.Add(new DebugLine(header));
@@ -666,7 +666,7 @@ namespace BetterEssenceCorruptionHelper
                 return;
             }
 
-            if (data.WasCorruptedByPlayer && data.PreviousAnalysis is { IsValid: true } before)
+            if (data.Corruption?.Before is { IsValid: true } before)
             {
                 var outcome = OutcomeClassifier.Classify(before.Essences, data.Analysis.Essences, out var ambiguous,
                     CorruptionModel.ApplicableOutcomes(_setup.Resolve()));

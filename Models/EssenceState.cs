@@ -1,24 +1,20 @@
 ﻿namespace BetterEssenceCorruptionHelper.Models
 {
     /// <summary>
-    /// Represents the recommended action for an essence monolith.
-    /// Used to determine visual indicators and track player decisions.
+    /// The recommended action for a trapped essence monster: what the CORRUPT / KILL indicator shows,
+    /// and what a Vaal Orb (or releasing it untouched) is judged against. One enum rather than two
+    /// flags, as the three cases are mutually exclusive. Where the essence is in its life is tracked
+    /// separately by <see cref="EssencePhase"/>.
     /// </summary>
     internal enum EssenceState
     {
-        /// <summary>Unknown or uninitialized state (essence not yet analyzed)</summary>
+        /// <summary>No recommendation: the label hasn't been read (or couldn't be)</summary>
         None,
 
-        /// <summary>
-        /// Essence is valuable and should be corrupted.
-        /// Applies to essences with MEDS patterns or 6+ total essences.
-        /// </summary>
+        /// <summary>The active strategy says corrupt it with a Vaal Orb.</summary>
         ShouldCorrupt,
 
-        /// <summary>
-        /// Essence is not valuable enough to justify corruption cost.
-        /// Player should kill/open without corrupting.
-        /// </summary>
+        /// <summary>The active strategy says release and kill it without corrupting.</summary>
         ShouldKill
     }
 }
