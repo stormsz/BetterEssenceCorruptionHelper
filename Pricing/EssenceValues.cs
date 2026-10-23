@@ -103,6 +103,10 @@ namespace BetterEssenceCorruptionHelper.Pricing
                         {
                             ({ } p, { } u) when p > u + OddPriceMargin => new EssenceValue(u, ValueSource.Capped, p, above),
                             ({ } p, _) => new EssenceValue(p, ValueSource.Market, p, null),
+                            // Unlisted below a listed tier worth less than the baseline (e.g. a 0.22c
+                            // Shrieking): the baseline would value the lower tier above it and turn
+                            // every tier upgrade into a phantom loss.
+                            (null, { } u) when marketReady && u < CheapValue => new EssenceValue(u, ValueSource.Cheap, null, above),
                             _ => missing,
                         };
 

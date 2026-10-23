@@ -84,6 +84,19 @@ public class EssenceValuesTests
     }
 
     [Fact]
+    public void An_unlisted_tier_is_never_worth_more_than_a_listed_tier_above_it()
+    {
+        // Shrieking Suffering trades at 0.22c; an unlisted Screaming must not count as the 0.5c baseline,
+        // or upgrading it would look like a loss.
+        var market = new Dictionary<string, double> { ["Shrieking Essence of Suffering"] = 0.22 };
+        var values = EssenceValues.Compute(e => market.TryGetValue(e.Name, out var p) ? p : null, marketReady: true);
+        var screaming = values[EssenceCatalogue.FindByName("Screaming Essence of Suffering")!];
+
+        Assert.Equal((ValueSource.Cheap, 0.22), (screaming.Source, screaming.Chaos!.Value));
+        Assert.True(screaming.IsApproximate);
+    }
+
+    [Fact]
     public void Micro_fluctuations_within_margin_are_not_capped()
     {
         var market = new Dictionary<string, double>

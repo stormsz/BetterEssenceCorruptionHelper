@@ -37,6 +37,12 @@ namespace BetterEssenceCorruptionHelper.Strategy
             if (analysis.IsCorrupted)
                 return new Recommendation(EssenceState.ShouldKill, "already corrupted");
 
+            // A readable label without a single essence line is one whose text hasn't populated yet
+            // (every monster in a monolith holds at least one essence). Without this it fell through
+            // to the Profit strategy's "no prices" KILL.
+            if (analysis.EssenceCount == 0)
+                return new Recommendation(EssenceState.None, "no essences read yet");
+
             var strategy = preferences.Strategy;
             return strategy.Mode switch
             {

@@ -187,6 +187,13 @@ public class StrategyEvaluatorTests
     }
 
     [Fact]
+    public void Label_without_essence_lines_yet_gives_no_recommendation()
+    {
+        // Structure readable, text not populated (or only monster modifiers so far): not a KILL.
+        Assert.Equal(EssenceState.None, StrategyEvaluator.Evaluate(Monolith("Hasted"), new TrackingPreferences(), Context()).State);
+    }
+
+    [Fact]
     public void Already_corrupted_monsters_are_killed()
     {
         var r = StrategyEvaluator.Evaluate(Monolith("Deafening Essence of Scorn", "Corrupted"), new TrackingPreferences(), Context());

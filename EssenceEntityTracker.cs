@@ -735,6 +735,18 @@ namespace BetterEssenceCorruptionHelper
             if (!reading.IsValid && previous.IsValid)
                 return;
 
+            // Every trapped monster holds at least one essence, so a readable label without a single
+            // essence line hasn't populated yet. Committing it would make it the "before" of the next
+            // corruption.
+            if (reading.IsValid && reading.EssenceCount == 0)
+                return;
+
+            // Nothing removes an essence from a trapped monster (no corruption outcome does either), so
+            // a shorter reading is a partial one. Committed, the full label coming back would look like
+            // an "added essence" corruption.
+            if (previous.IsValid && reading.EssenceCount < previous.EssenceCount)
+                return;
+
             if (reading.SameContentAs(previous))
             {
                 data.UnconfirmedAnalysis = null;
@@ -764,6 +776,10 @@ namespace BetterEssenceCorruptionHelper
                 HandleEssenceCorruption(data, previous, reading, shownState);
             else if (!previous.IsValid && reading.IsCorrupted && data.Decision == EssenceDecision.Undecided)
                 data.Decision = EssenceDecision.AlreadyCorrupted;
+            else if (data.Corruption is { } corruption && reading.IsCorrupted)
+                // Still trapped and the label settled further after the Vaal Orb: the outcome is
+                // classified at the kill from this, so keep it current.
+                data.Corruption = corruption with { After = reading };
 
             ApplyRecommendation(data, StrategyEvaluator.Evaluate(reading, _settings.Tracking, CurrentProfitContext()));
         }
@@ -773,10 +789,11 @@ namespace BetterEssenceCorruptionHelper
         /// <paramref name="reading"/> is the player's corruption. A Vaal Orb adds the "Corrupted" line;
         /// essences changing without it is a corruption whose marker wasn't read. Only an uncorrupted
         /// monster can be corrupted - never a second time - and a first reading is no change at all.
+        /// No outcome removes an essence, so fewer essences without the marker is a partial read.
         /// </summary>
         internal static bool IsCorruption(EssenceAnalysis previous, EssenceAnalysis reading) =>
             previous.IsValid && !previous.IsCorrupted && reading.IsValid && !reading.SameContentAs(previous) &&
-            (reading.IsCorrupted || (previous.EssenceCount > 0 && reading.EssenceCount > 0));
+            (reading.IsCorrupted || (previous.EssenceCount > 0 && reading.EssenceCount >= previous.EssenceCount));
 
         /// <summary>
         /// How a release without a Vaal Orb is judged, from the advice on screen. Not judged when the

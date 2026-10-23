@@ -44,6 +44,10 @@ public class EssenceDecisionTests
         Assert.True(EssenceEntityTracker.IsCorruption(Plain, Upgraded));
 
     [Fact]
+    public void Losing_an_essence_without_the_marker_is_a_partial_read() =>
+        Assert.False(EssenceEntityTracker.IsCorruption(Plain, Read("Shrieking Essence of Woe")));
+
+    [Fact]
     public void An_already_corrupted_monster_cannot_be_corrupted_again()
     {
         var reread = Read("Deafening Essence of Greed", "Deafening Essence of Woe", "Corrupted");

@@ -1,6 +1,7 @@
 using BetterEssenceCorruptionHelper.Analysis;
 using BetterEssenceCorruptionHelper.Catalogue;
 using BetterEssenceCorruptionHelper.Models;
+using BetterEssenceCorruptionHelper.Pricing;
 using BetterEssenceCorruptionHelper.Strategy;
 using Xunit;
 using static BetterEssenceCorruptionHelper.Tests.CatalogueTests;
@@ -141,7 +142,7 @@ public class CorruptionModelTests
         var transform = a.Outcomes.Single(o => o.Outcome == CorruptionOutcome.Transform);
         Assert.Equal(33.14 - 2.03, transform.MinGain, 6);
         Assert.Equal(45.47 - 2.03, transform.MaxGain, 6);
-        Assert.Equal((36.3 + 37.63) / 2 - 2.03, transform.UniformMeanGain!.Value, 6);
+        Assert.Equal((37.63 + 36.3 + 45.47 + 33.14) / 4 - 2.03, transform.UniformMeanGain!.Value, 6);
 
         // Worst case is the upgrade "doing nothing" minus the orb: a small loss.
         Assert.Equal(-Vaal, a.WorstNetGain, 6);
@@ -238,7 +239,7 @@ public class CorruptionModelTests
     [Fact]
     public void Expected_gain_counts_each_possible_outcome_as_equally_likely()
     {
-        var transformMean = (36.3 + 37.63) / 2 - 2.03;
+        var transformMean = (37.63 + 36.3 + 45.47 + 33.14) / 4 - 2.03;
 
         // Stability: tier +1 (nothing for Deafening) or transform, half each.
         var stability = Assess(Stability, "Deafening Essence of Misery");
@@ -259,7 +260,8 @@ public class CorruptionModelTests
     {
         // Setup where Shrieking Spite has an extreme troll listing of 95c, while Deafening Spite is 9.61c.
         // Group C essence (Suffering) transforms into Group D (Loathing 1c, Zeal 1.25c, Anguish 1c, Spite 95c).
-        // Median and tier-capping should prevent Suffering from showing positive expected net gain.
+        // Prices go through EssenceValues as in the plugin: its tier cap brings the 95c listing down to
+        // the Deafening price, and the (mean) expected value must stay below the default CORRUPT bar.
         var customPrices = new Dictionary<string, double>(Prices)
         {
             ["Shrieking Essence of Suffering"] = 1.0,
@@ -271,17 +273,20 @@ public class CorruptionModelTests
             ["Deafening Essence of Spite"] = 9.61,
         };
 
+        var values = EssenceValues.Compute(e => customPrices.TryGetValue(e.Name, out var p) ? p : 1.0, marketReady: true);
+        Assert.Equal(9.61, values[E("Shrieking Essence of Spite")].Chaos!.Value, 6);
+
         var a = CorruptionModel.Assess(
             [E("Shrieking Essence of Suffering")],
             0,
             Plain,
-            e => customPrices.TryGetValue(e.Name, out var p) ? p : 1.0,
+            e => values[e].Chaos,
             0.61,
-            out _)!;
+            out _,
+            e => values[e].IsApproximate)!;
 
-        // With arithmetic mean without capping, EV was +7.38c.
-        // With robust median and tier capping, EV must not be high profit (in fact negative after Vaal orb).
-        Assert.True(a.ExpectedNetGain < 0.5, $"Expected EV to be &lt; 0.5c, but got {a.ExpectedNetGain}");
+        // Uncapped, the troll listing made this +7.38c.
+        Assert.True(a.ExpectedNetGain < TrackingPreferences.DefaultMinExpectedProfit, $"Expected EV below the CORRUPT bar, but got {a.ExpectedNetGain}");
     }
 
     [Fact]

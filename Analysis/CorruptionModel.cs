@@ -92,8 +92,8 @@ namespace BetterEssenceCorruptionHelper.Analysis
     ///
     /// <para>
     /// Approximations, all reported: an essence without a usable value counts as 0c and is listed in
-    /// <see cref="CorruptionAssessment.UnpricedItems"/>; one whose value was estimated or capped (see
-    /// EssenceValues) is listed in <see cref="CorruptionAssessment.EstimatedItems"/>. The added essence of <see cref="CorruptionOutcome.AddEssence"/> is assumed to be a
+    /// <see cref="CorruptionAssessment.UnpricedItems"/>; one whose value is the unlisted baseline (see
+    /// EssenceValues; tier-capped prices count as market prices) is listed in <see cref="CorruptionAssessment.EstimatedItems"/>. The added essence of <see cref="CorruptionOutcome.AddEssence"/> is assumed to be a
     /// natural (Group A–E) essence, so its gain is bounded by [0, priciest natural essence]. Monster
     /// kill time and any other drops are ignored.
     /// </para>
@@ -271,10 +271,7 @@ namespace BetterEssenceCorruptionHelper.Analysis
 
             double expected = 0;
             if (candidates.Count > 0)
-            {
-                var values = candidates.Select(c => price(c) ?? EssenceValues.CheapValue).ToList();
-                expected = Median(values);
-            }
+                expected = candidates.Average(c => price(c) ?? EssenceValues.CheapValue);
 
             return new OutcomeRange(CorruptionOutcome.AddEssence, 0, cap, expected);
         }
@@ -290,34 +287,26 @@ namespace BetterEssenceCorruptionHelper.Analysis
                     continue;
 
                 var own = price(e);
-                double cMin = double.MaxValue, cMax = double.MinValue;
-                var netGains = new List<double>(candidates.Count);
+                double cMin = double.MaxValue, cMax = double.MinValue, sum = 0;
                 foreach (var c in candidates)
                 {
                     var p = price(c);
                     cMin = Math.Min(cMin, p);
                     cMax = Math.Max(cMax, p);
-                    netGains.Add(p - own);
+                    sum += p;
                 }
 
                 min += cMin - own;
                 max += cMax - own;
-                expected += Median(netGains);
+
+                // The type is picked uniformly, so the expectation is the plain mean. (A median here
+                // under-states right-skewed groups - Horror alone lifts Group F's mean ~10% above its
+                // median.) Thin-market outliers are handled where prices are made: EssenceValues caps
+                // a tier at the tier above it.
+                expected += sum / candidates.Count - own;
             }
 
             return new OutcomeRange(CorruptionOutcome.Transform, min, max, expected);
-        }
-
-        /// <summary>
-        /// Robust median of candidate values, protecting the expected value from single illiquid or
-        /// troll market listings (e.g. at end of league without assuming an efficient market).
-        /// </summary>
-        private static double Median(IReadOnlyList<double> values)
-        {
-            if (values.Count == 0) return 0;
-            var sorted = values.OrderBy(v => v).ToList();
-            var mid = sorted.Count / 2;
-            return sorted.Count % 2 != 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2.0;
         }
 
         private static OutcomeRange ResonanceReplace(IReadOnlyList<EssenceEntry> essences, double current, Func<EssenceEntry, double> price)
