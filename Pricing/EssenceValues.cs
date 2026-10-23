@@ -13,8 +13,8 @@ namespace BetterEssenceCorruptionHelper.Pricing
         /// <summary>Not traded on poe.ninja lately, so it is cheap (see <see cref="EssenceValues.CheapValue"/>).</summary>
         Cheap,
 
-        /// <summary>poe.ninja's price is a thin-market outlier (above the tier above it), so it counts as cheap too.</summary>
-        Ignored,
+        /// <summary>poe.ninja price exceeds the tier above it, capped to prevent thin-market outliers.</summary>
+        Capped,
 
         /// <summary>No value: Ninja Price isn't delivering prices at all.</summary>
         None,
@@ -23,28 +23,13 @@ namespace BetterEssenceCorruptionHelper.Pricing
     /// <summary>The value used for one essence, with the poe.ninja price it came from (if any).</summary>
     internal readonly record struct EssenceValue(double? Chaos, ValueSource Source, double? MarketChaos, EssenceEntry? Basis)
     {
-        public bool IsApproximate => Source is ValueSource.Cheap or ValueSource.Ignored;
+        public bool IsApproximate => Source is ValueSource.Cheap;
     }
 
     /// <summary>
-    /// A value for every essence, built from the <see cref="PriceBook"/> snapshot. No pricing of our
-    /// own: an essence is worth its poe.ninja price, or it is cheap.
-    ///
-    /// <para>
-    /// Cheap because poe.ninja only lists an essence after it traded on the currency exchange lately,
-    /// and what drops off is the low end (checked 2026-10-23, Allflame): poe.ninja keeps no data for
-    /// unlisted essences (its details endpoint returns 404); the ones that dropped off during the day
-    /// were all 1c when last listed; the traded Screaming and Shrieking essences have a median of about
-    /// 1c; every Deafening essence was listed; and the in-game exchange offered Whispering Hatred at 1c.
-    /// So a missing price is valued at <see cref="CheapValue"/> and shown as "&lt;1c".
-    /// </para>
-    ///
-    /// <para>
-    /// The same goes for a listed price more than <see cref="OddPriceMargin"/> above the tier above it
-    /// (e.g. a 92c Shrieking Spite next to a 9c Deafening one, a 24.5c Wailing Sorrow next to a 0.25c
-    /// Screaming one): these come from one odd trade, and taken at face value they made corrupting
-    /// low-tier monsters look profitable.
-    /// </para>
+    /// A value for every essence, built from the <see cref="PriceBook"/> snapshot. An essence is worth
+    /// its poe.ninja price, capped by the tier above it (a lower tier cannot legitimately hold more
+    /// market value than the tier above it in PoE), or if unlisted, a low baseline value.
     /// </summary>
     internal sealed class EssenceValues(PriceBook prices)
     {
@@ -52,10 +37,11 @@ namespace BetterEssenceCorruptionHelper.Pricing
         public const double CheapValue = 0.5;
 
         /// <summary>
-        /// How far above the next tier's value a price must be to count as odd. Cheap essences trade at
-        /// 1c steps, so a 1c Wailing next to a 0.5c Screaming is normal noise, not an outlier.
+        /// How far above the next tier's value a price must be to count as an outlier.
+        /// Low-tier essences trade in fractions of a chaos where 0.75c next to 0.74c is normal noise,
+        /// not an outlier, whereas a 15c Shrieking next to a 5c Deafening is an illiquid artifact.
         /// </summary>
-        public const double OddPriceMargin = 1;
+        public const double OddPriceMargin = 1.0;
 
         private readonly PriceBook _prices = prices;
         private readonly Dictionary<EssenceEntry, EssenceValue> _values = new();
@@ -82,8 +68,9 @@ namespace BetterEssenceCorruptionHelper.Pricing
         public bool IsApproximate(EssenceEntry entry) => Get(entry).IsApproximate;
 
         /// <summary>
-        /// The valuation rules, over any market (pure, for tests). <paramref name="marketReady"/> says
-        /// whether a missing price means "not traded" (cheap) or "no data at all" (no value).
+        /// Pure market valuation with tier ceiling. Evaluates from Deafening down to lowest tier so
+        /// higher tiers provide the upper bound. <paramref name="marketReady"/> says whether a missing
+        /// price means "not traded" (cheap baseline) or "no data at all" (no value).
         /// </summary>
         public static Dictionary<EssenceEntry, EssenceValue> Compute(Func<EssenceEntry, double?> market, bool marketReady)
         {
@@ -92,12 +79,14 @@ namespace BetterEssenceCorruptionHelper.Pricing
                 ? new EssenceValue(CheapValue, ValueSource.Cheap, null, null)
                 : new EssenceValue(null, ValueSource.None, null, null);
 
+            // Corrupted essences (Horror, Delirium, Hysteria, Insanity) have no upgrade tier
             foreach (var entry in EssenceCatalogue.All)
             {
                 if (entry.IsCorruptionOnly)
                     result[entry] = market(entry) is { } p ? new EssenceValue(p, ValueSource.Market, p, null) : missing;
             }
 
+            // Natural essence groups: evaluate from Deafening down to lowest tier
             foreach (var group in new[] { EssenceGroup.A, EssenceGroup.B, EssenceGroup.C, EssenceGroup.D, EssenceGroup.E })
             {
                 foreach (var type in EssenceCatalogue.TypesIn(group))
@@ -110,7 +99,7 @@ namespace BetterEssenceCorruptionHelper.Pricing
 
                         result[entry] = (market(entry), upper) switch
                         {
-                            ({ } p, { } u) when p > u + OddPriceMargin => new EssenceValue(CheapValue, ValueSource.Ignored, p, above),
+                            ({ } p, { } u) when p > u + OddPriceMargin => new EssenceValue(u, ValueSource.Capped, p, above),
                             ({ } p, _) => new EssenceValue(p, ValueSource.Market, p, null),
                             _ => missing,
                         };

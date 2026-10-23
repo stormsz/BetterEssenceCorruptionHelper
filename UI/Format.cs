@@ -36,13 +36,12 @@ namespace BetterEssenceCorruptionHelper.UI
         };
 
         /// <summary>
-        /// Short text for the value used. An estimate is only a floor, so below 1c it shows as "&lt;1c"
-        /// rather than a falsely precise "0.01c" (the calculations still use the floor).
+        /// Short text for the value used. Unlisted or unknown prices show as "-" (calculations still use the cheap floor).
         /// </summary>
         public static string Value(EssenceValue value) => value switch
         {
             { Chaos: not { } } => "-",
-            { IsApproximate: true } => "<1c",
+            { IsApproximate: true } => "-",
             _ => Chaos(value.Chaos.Value),
         };
 
@@ -50,8 +49,8 @@ namespace BetterEssenceCorruptionHelper.UI
         public static string ValueExplanation(EssenceValue value) => value.Source switch
         {
             ValueSource.Market => "Ninja Price.",
-            ValueSource.Cheap => "Ninja Price has no price for it, so it counts as cheap.",
-            ValueSource.Ignored => $"Ninja Price says {Chaos(value.MarketChaos ?? 0)}, more than {value.Basis?.Name} - an odd price, so it counts as cheap.",
+            ValueSource.Capped => $"Ninja Price ({Chaos(value.MarketChaos!.Value)}) capped at {Chaos(value.Chaos!.Value)} ({value.Basis!.TierName} tier).",
+            ValueSource.Cheap => $"Ninja Price has no price for it, so it counts as {Chaos(EssenceValues.CheapValue)}.",
             _ => "No price.",
         };
 

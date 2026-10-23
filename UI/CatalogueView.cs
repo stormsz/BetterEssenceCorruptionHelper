@@ -31,14 +31,17 @@ namespace BetterEssenceCorruptionHelper.UI
     {
         private static readonly Vector4 WarnColor = new(1f, 0.78f, 0.3f, 1f);
         private static readonly Vector4 GoodColor = new(0.45f, 0.9f, 0.45f, 1f);
-        private static readonly Vector4 VaalCell = new(0.20f, 0.50f, 0.25f, 0.55f);
         private static readonly Vector4 AlwaysCell = new(0.22f, 0.68f, 0.30f, 0.95f);
         private static readonly Vector4 NeverCell = new(0.62f, 0.18f, 0.16f, 0.75f);
         private static readonly Vector4 MissingCell = new(0f, 0f, 0f, 0.4f);
         private static readonly Vector4 BandRow = new(1f, 1f, 1f, 0.035f);
-        private static readonly Vector4 SelectedOutline = new(1f, 1f, 1f, 0.85f);
         private static readonly Vector4 ProblemBox = new(0.45f, 0.08f, 0.06f, 0.85f);
         private static readonly Vector4 WarningBox = new(0.40f, 0.30f, 0.05f, 0.75f);
+        private static readonly Vector4 AutoVaalBorder = new(0.20f, 0.88f, 0.40f, 0.95f);
+        private static readonly Vector4 ProfitGreen = new(0.25f, 0.95f, 0.35f, 1f);
+        private static readonly Vector4 WarnAmber = new(0.96f, 0.78f, 0.25f, 1f);
+        private static readonly Vector4 LossRed = new(0.95f, 0.36f, 0.36f, 1f);
+        private static readonly Vector4 NeutralGray = new(0.68f, 0.68f, 0.68f, 1f);
 
         /// <summary>Type name colours after poewiki's essence icons: A blue, B green, C amber, D red, E purple, F white.</summary>
         private static Vector4 GroupColor(EssenceGroup group) => group switch
@@ -90,8 +93,6 @@ namespace BetterEssenceCorruptionHelper.UI
         private readonly Dictionary<EssenceEntry, CorruptionAssessment?> _singleProfit = new();
         private (int, int, int) _profitKey = (-1, -1, -1);
 
-        private EssenceEntry? _selected;
-        private float _legendHeight;
         private List<(string Metadata, string BaseName)>? _uncatalogued;
         private string? _copyNote;
 
@@ -113,7 +114,10 @@ namespace BetterEssenceCorruptionHelper.UI
             var preferences = Preferences;
             var strategy = preferences.Strategy;
 
-            ImGui.SetNextItemWidth(300);
+            ImGui.AlignTextToFramePadding();
+            ImGui.TextDisabled("Strategy:");
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(260);
             if (ImGui.BeginCombo("##strategy", strategy.DisplayName))
             {
                 foreach (var candidate in Strategies.All)
@@ -128,17 +132,19 @@ namespace BetterEssenceCorruptionHelper.UI
             }
 
             ImGui.SameLine();
-            ImGui.TextDisabled("(?)");
-            if (ImGui.IsItemHovered())
+            ImGui.TextDisabled(strategy.Summary);
+
+            if (strategy.Notes.Count > 0)
             {
-                ImGui.BeginTooltip();
-                ImGui.PushTextWrapPos(460);
-                ImGui.Text(strategy.Summary);
-                ImGui.Spacing();
-                foreach (var note in strategy.Notes)
-                    ImGui.BulletText(note);
-                ImGui.PopTextWrapPos();
-                ImGui.EndTooltip();
+                ImGui.SameLine();
+                ImGui.TextDisabled("(?)");
+                if (ImGui.IsItemHovered())
+                {
+                    ImGui.BeginTooltip();
+                    foreach (var note in strategy.Notes)
+                        ImGui.Text(note);
+                    ImGui.EndTooltip();
+                }
             }
 
             if (SetupStatus.Describe(strategy, _setup) is { } status)
@@ -160,17 +166,6 @@ namespace BetterEssenceCorruptionHelper.UI
 
             switch (strategy.Mode)
             {
-                case StrategyMode.Profit:
-                    ImGui.Spacing();
-                    var profit = (float)preferences.EffectiveMinExpectedProfit;
-                    ImGui.SetNextItemWidth(160);
-                    if (ImGui.SliderFloat("Vaal when the expected profit is at least", ref profit, 0f, 20f, "%.1f chaos"))
-                    {
-                        preferences.MinExpectedProfit = profit;
-                        preferences.Changed();
-                    }
-                    break;
-
                 case StrategyMode.FixedSet:
                     ImGui.Spacing();
                     var pack = preferences.EffectiveMinPackSize;
@@ -189,31 +184,35 @@ namespace BetterEssenceCorruptionHelper.UI
             ImGui.Spacing();
             var medsStrategy = strategy.Mode == StrategyMode.FixedSet;
             if (medsStrategy)
+            {
                 DrawGrid("essenceMedsGrid", MedsGroups, MedsTiers);
+            }
             else
+            {
                 DrawGrid("essenceCorruptedGrid", CorruptedGroups, CorruptedTiers);
+                ImGui.Spacing();
+                ImGui.Spacing();
+                ImGui.Spacing();
+                DrawGrid("essenceAllGrid", OtherGroupsWithMeds, OtherTiers);
+            }
             ImGui.Spacing();
             ImGui.Spacing();
-            ImGui.Spacing();
-            DrawGrid(medsStrategy ? "essenceOtherGrid" : "essenceAllGrid", medsStrategy ? OtherGroups : OtherGroupsWithMeds, OtherTiers);
-            var gridHeight = ImGui.GetItemRectSize().Y;
-
-            // Legend to the right of the main table, bottom-aligned with it: a spacer inside the group
-            // pushes it down (its height is last frame's - it only changes when the strategy does).
-            ImGui.SameLine(0, 14);
-            ImGui.BeginGroup();
-            ImGui.Dummy(new Vector2(1, Math.Max(0, gridHeight - _legendHeight)));
-            ImGui.BeginGroup();
             DrawLegend();
-            ImGui.EndGroup();
-            _legendHeight = ImGui.GetItemRectSize().Y;
-            ImGui.EndGroup();
         }
 
         /// <summary>Why the Profit strategy can't price anything right now, or null when Ninja Price is ready.</summary>
         private SetupStatus.Status? NinjaPriceProblem() => _prices.Status switch
         {
             ProviderStatus.Ready => null,
+            ProviderStatus.Disabled => new SetupStatus.Status(SetupStatus.Level.Problem,
+                "Ninja Price is disabled in ExileApi",
+                "Enable the 'Ninja Price' plugin in ExileApi's Plugins menu. Until then, only monsters holding a MEDS essence get a Vaal Orb."),
+            ProviderStatus.NotInstalled => new SetupStatus.Status(SetupStatus.Level.Problem,
+                "Ninja Price plugin is not installed",
+                "Install the Ninja Price (Get-Chaos-Value) plugin. Until then, only monsters holding a MEDS essence get a Vaal Orb."),
+            ProviderStatus.FailedCompilation => new SetupStatus.Status(SetupStatus.Level.Problem,
+                "Ninja Price failed to compile",
+                "Check ExileCore compilation logs for Ninja Price errors. Until then, only monsters holding a MEDS essence get a Vaal Orb."),
             ProviderStatus.Unavailable => new SetupStatus.Status(SetupStatus.Level.Problem,
                 "Profit needs the Ninja Price plugin",
                 "Install and enable Ninja Price. Until then, only monsters holding a MEDS essence get a Vaal Orb."),
@@ -244,31 +243,34 @@ namespace BetterEssenceCorruptionHelper.UI
         private void DrawPriceRow()
         {
             var vaal = _prices.VaalOrb;
-            ImGui.AlignTextToFramePadding();
             var problem = _prices.Status switch
             {
+                ProviderStatus.Disabled => "Ninja Price is disabled in ExileApi - enable it in the Plugins menu.",
+                ProviderStatus.NotInstalled => "Ninja Price is not installed - install the Ninja Price plugin to see prices.",
+                ProviderStatus.FailedCompilation => "Ninja Price failed to compile - check ExileCore errors.",
                 ProviderStatus.Loading => "Ninja Price is still loading prices.",
                 ProviderStatus.EssenceDataMissing => "Ninja Price has no essence prices - is Essence valuation off in its settings?",
                 ProviderStatus.Unavailable => "Ninja Price isn't running - enable it to see prices.",
                 _ => null,
             };
             if (problem != null)
-                ImGui.TextColored(WarnColor, problem);
-            else
-                ImGui.Text($"Vaal Orb {Format.Chaos(vaal.Chaos)}");
-
-            ImGui.SameLine(0, 16);
-            if (ImGui.SmallButton("Refresh prices"))
-                _prices.Invalidate(reResolveProvider: true);
-            if (ImGui.IsItemHovered() && _prices.LastSampleMs is { } sampled)
-                ImGui.SetTooltip($"Prices from Ninja Price, updated {Format.Age(_clockMs() - sampled)} ago. They refresh on their own.");
-            ImGui.SameLine();
-            if (ImGui.SmallButton("Copy prices"))
-                Copy(BuildPricesTsv(), "prices");
-            if (_copyNote != null)
             {
-                ImGui.SameLine();
-                ImGui.TextDisabled(_copyNote);
+                ImGui.TextColored(WarnColor, problem);
+                return;
+            }
+
+            var size = ImGui.GetTextLineHeight();
+            if (_icons.For("Vaal") is { } vaalIcon)
+            {
+                ImGui.Image(vaalIcon, new Vector2(size, size));
+                ImGui.SameLine(0, 5);
+            }
+
+            ImGui.Text($"Vaal Orb {Format.Chaos(vaal.Chaos)}");
+            if (_prices.LastSampleMs is { } sampled)
+            {
+                ImGui.SameLine(0, 10);
+                ImGui.TextDisabled($"·  Auto-refreshed {Format.Age(_clockMs() - sampled)} ago (every {PriceBook.RefreshIntervalMs / 1000}s · prices & planner recommendations)");
             }
         }
 
@@ -357,101 +359,282 @@ namespace BetterEssenceCorruptionHelper.UI
             entries.ForEach(e => Preferences.SetChoice(e, next));
         }
 
-        /// <summary>A cell's background and what it means, in plain words, under the current strategy.</summary>
-        private (Vector4? Background, string Meaning) CellState(EssenceEntry entry, StrategyMode mode)
+        /// <summary>A cell's background and border under the current strategy.</summary>
+        private (Vector4? Background, Vector4? Border) CellState(EssenceEntry entry, StrategyMode mode)
         {
             if (entry.IsCorruptionOnly)
-                return (null, "Only from a Vaal Orb on a monster holding a MEDS essence.");
+                return (null, null);
 
             var preferences = Preferences;
             switch (mode)
             {
                 case StrategyMode.FixedSet:
                     return preferences.Strategy.CorruptsByRule(entry)
-                        ? (VaalCell, "Monsters holding it get a Vaal Orb.")
-                        : (null, "Monsters holding it are killed as they are.");
+                        ? (null, AutoVaalBorder)
+                        : (null, null);
 
                 case StrategyMode.NoCorruption:
-                    return (null, "Deafening farming never uses Vaal Orbs.");
+                    return (null, null);
             }
 
             var assessment = SingleProfit(entry);
             var profit = assessment?.ExpectedNetGain;
-            var outcomes = assessment != null ? OutcomeText(entry, assessment) : "No price to judge it by.";
             return preferences.Choice(entry) switch
             {
-                EssenceChoice.Always => (AlwaysCell, $"{outcomes}\n\nAlways Vaal (your pick). Click for never."),
-                EssenceChoice.Never => (NeverCell, $"{outcomes}\n\nNever Vaal (your pick). Click for automatic."),
-                _ when profit >= preferences.EffectiveMinExpectedProfit => (VaalCell, $"{outcomes}\n\nWorth it. Click to always Vaal."),
-                _ => (null, $"{outcomes}\n\nNot worth it on its own. Click to always Vaal."),
+                EssenceChoice.Always => (AlwaysCell, AutoVaalBorder),
+                EssenceChoice.Never => (NeverCell, null),
+                _ when profit >= preferences.EffectiveMinExpectedProfit => (null, AutoVaalBorder),
+                _ => (null, null),
             };
         }
 
-        /// <summary>
-        /// What a Vaal Orb can do to a monster holding only this essence (poewiki, "Corrupting essence
-        /// monsters"), what each outcome is worth, and the expected result after the orb.
-        /// </summary>
-        private string OutcomeText(EssenceEntry entry, CorruptionAssessment assessment)
-        {
-            var sb = new StringBuilder("A Vaal Orb on a monster holding only this can:\n");
-            foreach (var outcome in assessment.Outcomes)
-            {
-                sb.Append("  ").Append(outcome.Outcome switch
-                {
-                    CorruptionOutcome.NoChange => "do nothing: +0c",
-                    CorruptionOutcome.TierUpgrade when EssenceCatalogue.UpgradeOf(entry) is { } up && up != entry =>
-                        $"upgrade it to {up.Name}: {Format.SignedChaos(outcome.MinGain)}",
-                    CorruptionOutcome.TierUpgrade => "upgrade it: already Deafening, +0c",
-                    CorruptionOutcome.AddEssence => "add another essence: counted as +0c",
-                    CorruptionOutcome.Transform => $"turn it into a random {TransformTarget(entry)}: {Format.SignedChaos(outcome.UniformMeanGain ?? 0)} on average " +
-                                                   $"({Format.SignedChaos(outcome.MinGain)} to {Format.SignedChaos(outcome.MaxGain)})",
-                    _ => outcome.Outcome.ToString(),
-                }).Append('\n');
-            }
-
-            sb.Append($"Each counted as equally likely: {Format.SignedChaos(assessment.ExpectedNetGain)} expected after the {Format.Chaos(assessment.VaalOrbCost)} orb.");
-            return sb.ToString();
-        }
-
-        private static string TransformTarget(EssenceEntry entry)
-        {
-            var candidates = EssenceCatalogue.TransformCandidates(entry);
-            return entry.IsMeds
-                ? "Hysteria, Insanity, Horror or Delirium"
-                : $"{candidates[0].TierName} {string.Join("/", candidates.Select(c => c.TypeName))}";
-        }
 
         private void DrawGridCell(EssenceEntry entry, StrategyMode mode, long now)
         {
             var value = _values.Get(entry);
-            var (background, meaning) = CellState(entry, mode);
+            var (background, border) = CellState(entry, mode);
             if (background is { } bg)
                 ImGui.TableSetBgColor(ImGuiTableBgTarget.CellBg, ImGui.GetColorU32(bg));
 
             var textColor = value.Source switch
             {
                 ValueSource.Market => ImGui.GetStyle().Colors[(int)ImGuiCol.Text],
-                ValueSource.Ignored => WarnColor,
                 _ => ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled],
             };
 
-            ImGui.PushStyleColor(ImGuiCol.Text, textColor);
-            if (ImGui.Selectable($"{Format.Value(value)}##cell{entry.Name}", false))
+            var text = Format.Value(value);
+            var textSize = ImGui.CalcTextSize(text);
+            var availWidth = ImGui.GetContentRegionAvail().X;
+
+            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0f, 0f, 0f, 0f));
+            if (ImGui.Selectable($"{text}##cell{entry.Name}", false, ImGuiSelectableFlags.None, new Vector2(availWidth, 0)))
             {
-                _selected = entry;
                 if (mode == StrategyMode.Profit)
                     Preferences.CycleChoice(entry);
             }
             ImGui.PopStyleColor();
 
+            var min = ImGui.GetItemRectMin();
+            var max = ImGui.GetItemRectMax();
+
+            // Center the cell value text horizontally and vertically
+            var textX = min.X + Math.Max(0f, (max.X - min.X - textSize.X) * 0.5f);
+            var textY = min.Y + Math.Max(0f, (max.Y - min.Y - textSize.Y) * 0.5f);
+            ImGui.GetWindowDrawList().AddText(new Vector2(textX, textY), ImGui.GetColorU32(textColor), text);
+
+            if (border is { } b)
+                ImGui.GetWindowDrawList().AddRect(min, max, ImGui.GetColorU32(b), 0f, ImDrawFlags.None, 1.5f);
+
             if (mode == StrategyMode.Profit && ImGui.IsItemClicked(ImGuiMouseButton.Right))
                 Preferences.SetChoice(entry, EssenceChoice.Auto);
 
-            if (_selected == entry)
-                ImGui.GetWindowDrawList().AddRect(ImGui.GetItemRectMin(), ImGui.GetItemRectMax(), ImGui.GetColorU32(SelectedOutline));
-
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip($"{entry.Name}: {(value.Chaos != null ? Format.Value(value) : "no price")}\n{Format.ValueExplanation(value)}\n\n{meaning}");
+                DrawCellTooltip(entry, value, SingleProfit(entry), mode);
+        }
+
+        private void DrawCellTooltip(EssenceEntry entry, EssenceValue value, CorruptionAssessment? assessment, StrategyMode mode)
+        {
+            ImGui.BeginTooltip();
+
+            // 1. Essence Name & Current Price with Source
+            ImGui.TextColored(GroupColor(entry.Group), entry.Name);
+            ImGui.TextDisabled("Value: ");
+            ImGui.SameLine(0, 0);
+            if (value.Chaos is { } chaos)
+            {
+                ImGui.TextColored(new Vector4(1f, 1f, 1f, 1f), Format.Chaos(chaos));
+                ImGui.SameLine(0, 6);
+                if (value.Source == ValueSource.Market)
+                    ImGui.TextDisabled("(Source: Ninja Price)");
+                else if (value.Source == ValueSource.Capped)
+                    ImGui.TextDisabled($"(Source: Ninja Price {Format.Chaos(value.MarketChaos!.Value)} capped at {value.Basis!.TierName} tier)");
+                else
+                    ImGui.TextDisabled($"(Source: Ninja Price unlisted -> {Format.Chaos(EssenceValues.CheapValue)} base)");
+            }
+            else
+            {
+                ImGui.TextDisabled("No price available from Ninja Price");
+            }
+
+            if (entry.IsCorruptionOnly)
+            {
+                ImGui.Spacing();
+                ImGui.Separator();
+                ImGui.TextDisabled("Corrupted essence. Obtained only by Vaaling purple MEDS (Misery, Envy, Dread, Scorn).");
+                ImGui.TextDisabled("Cannot be modified by a Vaal Orb.");
+                ImGui.EndTooltip();
+                return;
+            }
+
+            if (mode == StrategyMode.NoCorruption)
+            {
+                ImGui.Spacing();
+                ImGui.Separator();
+                ImGui.TextDisabled("Deafening farming: never uses Vaal Orbs (kill monster and boss to duplicate).");
+                ImGui.EndTooltip();
+                return;
+            }
+
+            if (mode == StrategyMode.FixedSet)
+            {
+                ImGui.Spacing();
+                ImGui.Separator();
+                if (Preferences.Strategy.CorruptsByRule(entry))
+                    ImGui.TextColored(ProfitGreen, "Strategy Target: Corrupt monster holding MEDS for chance at Horror, Delirium, Hysteria, or Insanity.");
+                else
+                    ImGui.TextDisabled("Strategy Target: Kill as-is (not a MEDS essence).");
+                ImGui.EndTooltip();
+                return;
+            }
+
+            // Profit Mode: Full Assessment Breakdown
+            ImGui.Spacing();
+            ImGui.Separator();
+
+            if (assessment == null)
+            {
+                ImGui.TextDisabled("No price data to evaluate expected value.");
+                ImGui.EndTooltip();
+                return;
+            }
+
+            ImGui.TextDisabled("A Vaal Orb on a monster holding only this can:");
+            foreach (var outcome in assessment.Outcomes)
+            {
+                switch (outcome.Outcome)
+                {
+                    case CorruptionOutcome.NoChange:
+                        ImGui.TextDisabled("  Do nothing: ");
+                        ImGui.SameLine(0, 0);
+                        ImGui.TextColored(NeutralGray, "+0c");
+                        break;
+
+                    case CorruptionOutcome.TierUpgrade:
+                        if (EssenceCatalogue.UpgradeOf(entry) is { } up && up != entry)
+                        {
+                            ImGui.TextDisabled($"  Upgrade to {up.Name}: ");
+                            ImGui.SameLine(0, 0);
+                            var upGain = outcome.MinGain;
+                            ImGui.TextColored(upGain > 0 ? ProfitGreen : (upGain < 0 ? LossRed : NeutralGray), Format.SignedChaos(upGain));
+                        }
+                        else
+                        {
+                            ImGui.TextDisabled("  Upgrade tier: ");
+                            ImGui.SameLine(0, 0);
+                            ImGui.TextColored(NeutralGray, "already Deafening (+0c)");
+                        }
+                        break;
+
+                    case CorruptionOutcome.AddEssence:
+                        ImGui.TextDisabled("  Add essence: ");
+                        ImGui.SameLine(0, 0);
+                        var addGain = outcome.UniformMeanGain ?? 0;
+                        ImGui.TextColored(addGain > 0 ? ProfitGreen : NeutralGray, $"{Format.SignedChaos(addGain)} typical value");
+                        break;
+
+                    case CorruptionOutcome.Transform:
+                        var candidates = EssenceCatalogue.TransformCandidates(entry);
+                        var targetDesc = entry.IsMeds
+                            ? "Transform into Corrupted: "
+                            : candidates.Count > 0
+                                ? $"Transform into {candidates[0].TierName}: "
+                                : "Transform: ";
+
+                        ImGui.TextDisabled($"  {targetDesc}");
+                        ImGui.SameLine(0, 0);
+                        var tGain = outcome.UniformMeanGain ?? 0;
+                        var tColor = tGain > 0 ? ProfitGreen : (tGain < 0 ? LossRed : NeutralGray);
+                        ImGui.TextColored(tColor, $"{Format.SignedChaos(tGain)} avg ({Format.SignedChaos(outcome.MinGain)} to {Format.SignedChaos(outcome.MaxGain)})");
+
+                        if (candidates.Count > 0)
+                        {
+                            var ownPrice = value.Chaos ?? EssenceValues.CheapValue;
+                            var iconSize = ImGui.GetTextLineHeight();
+                            ImGui.TextDisabled("    ");
+                            for (var i = 0; i < candidates.Count; i++)
+                            {
+                                var cand = candidates[i];
+                                var candPrice = _values.ValueOf(cand) ?? EssenceValues.CheapValue;
+                                var netGain = candPrice - ownPrice;
+                                var netColor = netGain > 0 ? ProfitGreen : (netGain < 0 ? LossRed : NeutralGray);
+
+                                ImGui.SameLine(0, 0);
+                                if (_icons.For(cand.TypeName) is { } icon)
+                                {
+                                    ImGui.Image(icon, new Vector2(iconSize, iconSize));
+                                    ImGui.SameLine(0, 3);
+                                }
+
+                                ImGui.TextDisabled($"{cand.TypeName} ");
+                                ImGui.SameLine(0, 0);
+                                ImGui.TextColored(netColor, Format.SignedChaos(netGain));
+
+                                if (i < candidates.Count - 1)
+                                {
+                                    ImGui.SameLine(0, 0);
+                                    ImGui.TextDisabled("  ·  ");
+                                }
+                            }
+                        }
+                        break;
+                }
+            }
+
+            ImGui.Spacing();
+            ImGui.Separator();
+
+            // Vaal Orb Cost
+            ImGui.TextDisabled("Vaal Orb cost: ");
+            ImGui.SameLine(0, 0);
+            ImGui.TextColored(LossRed, $"-{Format.Chaos(assessment.VaalOrbCost)}");
+
+            // Expected Profit & Decision
+            var ev = assessment.ExpectedNetGain;
+            var wantedEv = Preferences.EffectiveMinExpectedProfit;
+            var evColor = ev >= wantedEv ? ProfitGreen : (ev > 0 ? WarnAmber : LossRed);
+
+            ImGui.Text("Expected Profit: ");
+            ImGui.SameLine(0, 0);
+            ImGui.TextColored(evColor, Format.SignedChaos(ev));
+
+            var choice = Preferences.Choice(entry);
+            string decisionText;
+            Vector4 decisionColor;
+
+            switch (choice)
+            {
+                case EssenceChoice.Always:
+                    decisionText = "ALWAYS VAAL (manual override)";
+                    decisionColor = ProfitGreen;
+                    break;
+                case EssenceChoice.Never:
+                    decisionText = "NEVER VAAL (manual override)";
+                    decisionColor = LossRed;
+                    break;
+                default:
+                    if (ev >= wantedEv)
+                    {
+                        decisionText = wantedEv > 0
+                            ? $"VAAL (EV >= +{Format.Chaos(wantedEv)} target)"
+                            : "VAAL (positive EV)";
+                        decisionColor = ProfitGreen;
+                    }
+                    else
+                    {
+                        decisionText = ev > 0
+                            ? $"KILL AS-IS (EV below +{Format.Chaos(wantedEv)} target)"
+                            : "KILL AS-IS (expected loss)";
+                        decisionColor = LossRed;
+                    }
+                    break;
+            }
+
+            ImGui.Text("Decision: ");
+            ImGui.SameLine(0, 0);
+            ImGui.TextColored(decisionColor, decisionText);
+
+            ImGui.TextDisabled("Left-click: Always -> Never -> Auto  ·  Right-click: Reset");
+            ImGui.EndTooltip();
         }
 
         /// <summary>
@@ -478,63 +661,88 @@ namespace BetterEssenceCorruptionHelper.UI
             return assessment;
         }
 
-        /// <summary>Only what the current strategy's table actually uses, in a few short words each.</summary>
+        /// <summary>Clean, compact legend under the tables without bulky boxes.</summary>
         private void DrawLegend()
         {
-            switch (Preferences.Strategy.Mode)
-            {
-                case StrategyMode.Profit:
-                    Swatch(VaalCell, "Worth a Vaal");
-                    Swatch(AlwaysCell, "Always (you)");
-                    Swatch(NeverCell, "Never (you)");
-                    DrawResetPicks();
-                    break;
-                case StrategyMode.FixedSet:
-                    Swatch(VaalCell, "Gets a Vaal");
-                    break;
-            }
+            var mode = Preferences.Strategy.Mode;
 
-            Sample(ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled], "no price");
-            Sample(WarnColor, "odd price");
+            ImGui.Spacing();
+            ImGui.AlignTextToFramePadding();
+            if (mode == StrategyMode.Profit)
+            {
+                SwatchBorder(AutoVaalBorder, $"Auto corrupt (>={Format.Chaos(Preferences.EffectiveMinExpectedProfit)})");
+                ImGui.SameLine(0, 16);
+                Swatch(AlwaysCell, "Always (you)");
+                ImGui.SameLine(0, 16);
+                Swatch(NeverCell, "Never (you)");
+                ImGui.SameLine(0, 16);
+                Sample(ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled], $"Unlisted ({Format.Chaos(EssenceValues.CheapValue)})");
+
+                var picks = Preferences.EssenceOverrides.Count;
+                if (picks > 0)
+                {
+                    ImGui.SameLine(0, 20);
+                    if (ImGui.SmallButton($"Reset picks ({picks})"))
+                        Preferences.ClearChoices();
+                    if (ImGui.IsItemHovered())
+                        ImGui.SetTooltip("Reset all manual always/never picks back to automatic.\nRight-click any cell or row name to reset just that one.");
+                }
+            }
+            else if (mode == StrategyMode.FixedSet)
+            {
+                SwatchBorder(AutoVaalBorder, "Corrupt target (MEDS)");
+                ImGui.SameLine(0, 16);
+                ImGui.TextDisabled("Horror, Delirium, Hysteria, and Insanity cannot be Vaaled.");
+            }
+            else
+            {
+                ImGui.TextDisabled("Deafening boss farming: Kill all essences, then kill map boss. No Vaal Orbs.");
+            }
         }
 
-        /// <summary>
-        /// Puts every always/never pick back to automatic. Always there (greyed out with no picks), so
-        /// the legend keeps its size and the way back is easy to find.
-        /// </summary>
-        private void DrawResetPicks()
+        private static void SwatchBorder(Vector4 borderColor, string label)
         {
-            var picks = Preferences.EssenceOverrides.Count;
-            ImGui.BeginDisabled(picks == 0);
-            if (ImGui.SmallButton(picks > 0 ? $"Reset picks ({picks})" : "Reset picks"))
-                Preferences.ClearChoices();
-            ImGui.EndDisabled();
-            if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-                ImGui.SetTooltip(picks > 0
-                    ? "Back to automatic for every essence you set to always or never.\nRight-click a cell or a row name to reset just that one."
-                    : "No picks. Click a cell to always Vaal it, again for never.");
-            ImGui.Spacing();
+            var p0 = ImGui.GetCursorScreenPos();
+            var size = new Vector2(26f, ImGui.GetFrameHeight());
+            var p1 = p0 + size;
+            ImGui.GetWindowDrawList().AddRect(p0, p1, ImGui.GetColorU32(borderColor), 0f, ImDrawFlags.None, 1.5f);
+            ImGui.Dummy(size);
+            ImGui.SameLine(0, 6);
+            ImGui.Text(label);
         }
 
         private static void Swatch(Vector4 color, string label)
         {
-            ImGui.ColorButton($"##swatch{label}", color with { W = Math.Max(color.W, 0.6f) },
-                ImGuiColorEditFlags.NoTooltip | ImGuiColorEditFlags.NoPicker | ImGuiColorEditFlags.NoDragDrop,
-                new Vector2(ImGui.CalcTextSize("<1c").X, ImGui.GetTextLineHeight()));
-            ImGui.SameLine();
+            var p0 = ImGui.GetCursorScreenPos();
+            var size = new Vector2(26f, ImGui.GetFrameHeight());
+            var p1 = p0 + size;
+            ImGui.GetWindowDrawList().AddRectFilled(p0, p1, ImGui.GetColorU32(color with { W = Math.Max(color.W, 0.6f) }));
+            ImGui.Dummy(size);
+            ImGui.SameLine(0, 6);
             ImGui.Text(label);
         }
 
-        /// <summary>A "&lt;1c" in the cell's colour, then what it means in normal text.</summary>
-        private static void Sample(Vector4 color, string label)
+        private static void Sample(Vector4 textColor, string label)
         {
-            ImGui.TextColored(color, "<1c");
-            ImGui.SameLine();
+            ImGui.BeginGroup();
+            var p0 = ImGui.GetCursorScreenPos();
+            var size = new Vector2(26f, ImGui.GetFrameHeight());
+            var p1 = p0 + size;
+            var drawList = ImGui.GetWindowDrawList();
+            drawList.AddRectFilled(p0, p1, ImGui.GetColorU32(new Vector4(0.12f, 0.12f, 0.14f, 0.9f)));
+            drawList.AddRect(p0, p1, ImGui.GetColorU32(new Vector4(0.35f, 0.35f, 0.35f, 0.6f)));
+            const string text = "-";
+            var textSize = ImGui.CalcTextSize(text);
+            var textX = p0.X + (size.X - textSize.X) * 0.5f;
+            var textY = p0.Y + (size.Y - textSize.Y) * 0.5f - 1f;
+            drawList.AddText(new Vector2(textX, textY), ImGui.GetColorU32(textColor), text);
+            ImGui.Dummy(size);
+            ImGui.SameLine(0, 6);
             ImGui.Text(label);
+            ImGui.EndGroup();
+
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip(label == "no price"
-                    ? "Ninja Price has no price for it, so it counts as cheap."
-                    : "Ninja Price's price is above the tier above it - an odd trade - so it counts as cheap.");
+                ImGui.SetTooltip($"Ninja Price has no price for it (shown as '-'), so it counts as {Format.Chaos(EssenceValues.CheapValue)} in calculations.");
         }
 
         #endregion
@@ -556,8 +764,12 @@ namespace BetterEssenceCorruptionHelper.UI
             ImGui.SameLine();
             if (ImGui.Button("Copy performance"))
                 Copy(BuildPerformanceText(), "performance");
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("How much work the essence tracker does per second, for troubleshooting.");
+            ImGui.SameLine();
+            if (ImGui.Button("Reset session stats"))
+            {
+                _corruptionLog.ResetSession();
+                _copyNote = "session stats reset";
+            }
 
             ImGui.Spacing();
             ImGui.Spacing();
@@ -595,7 +807,7 @@ namespace BetterEssenceCorruptionHelper.UI
         {
             const ImGuiTableFlags flags = ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders | ImGuiTableFlags.SizingFixedFit |
                                           ImGuiTableFlags.Resizable | ImGuiTableFlags.ScrollX | ImGuiTableFlags.ScrollY;
-            if (!ImGui.BeginTable("bechMapping", 5, flags, new Vector2(0, 240)))
+            if (!ImGui.BeginTable("bechMapping", 4, flags, new Vector2(0, 240)))
                 return;
 
             ImGui.TableSetupScrollFreeze(1, 1);
@@ -603,7 +815,6 @@ namespace BetterEssenceCorruptionHelper.UI
             ImGui.TableSetupColumn("Game files");
             ImGui.TableSetupColumn("Ninja Price");
             ImGui.TableSetupColumn("Value used");
-            ImGui.TableSetupColumn("Metadata");
             ImGui.TableHeadersRow();
 
             foreach (var (entry, item) in MappingItems())
@@ -620,8 +831,6 @@ namespace BetterEssenceCorruptionHelper.UI
                 ImGui.Text(Format.Price(_prices.Get(item)));
                 ImGui.TableNextColumn();
                 ImGui.Text(entry == null ? Format.Price(_prices.Get(item)) : Format.Value(_values.Get(entry)));
-                ImGui.TableNextColumn();
-                ImGui.TextDisabled(item.Metadata);
             }
 
             ImGui.EndTable();
@@ -672,9 +881,21 @@ namespace BetterEssenceCorruptionHelper.UI
             sb.Append("current_map\t").Append(_setup.CurrentMap?.ToString() ?? "not in a map").Append('\n');
             sb.Append("last_map\t").Append(_setup.LastMap?.ToString() ?? "none yet").Append('\n');
             sb.Append("setup_used\t").Append(_setup.Resolve()).Append('\n');
+            sb.Append("ninja_price_status\t").Append(_prices.Status).Append('\n');
+            var np = _bridge.GetStatus();
+            sb.Append("ninja_price_plugin_state\t").Append(np.PluginState).Append('\n');
+            sb.Append("ninja_price_bridge_registered\t").Append(np.IsBridgeRegistered).Append('\n');
+            if (!string.IsNullOrEmpty(np.FailureDetails))
+                sb.Append("ninja_price_failure_details\t").Append(np.FailureDetails).Append('\n');
             sb.Append("atlas_passives\t").Append(string.Join(", ", _setup.AtlasPassiveNames)).Append('\n');
             foreach (var (stat, value) in _setup.EssenceMapStats())
                 sb.Append(stat).Append('\t').Append(value).Append('\n');
+            sb.Append("session_monsters_killed\t").Append(_corruptionLog.TotalKilled).Append('\n');
+            sb.Append("session_corruptions\t").Append(_corruptionLog.Total).Append('\n');
+            sb.Append("session_recommended_corruptions\t").Append(_corruptionLog.RecommendedCorruptions).Append('\n');
+            sb.Append("session_mistaken_corruptions\t").Append(_corruptionLog.MistakenCorruptions).Append('\n');
+            sb.Append("session_missed_corruptions\t").Append(_corruptionLog.TotalMissed).Append('\n');
+            sb.Append("session_realized_gain_chaos\t").Append(_corruptionLog.RealizedGainSum).Append('\n');
             return sb.ToString();
         }
 

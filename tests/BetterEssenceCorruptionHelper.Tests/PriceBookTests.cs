@@ -201,4 +201,63 @@ public class PriceBookTests
         _now += PriceBook.RefreshIntervalMs;
         Assert.True(book.Update());
     }
+
+    [Fact]
+    public void Disabled_plugin_reports_disabled_status()
+    {
+        var book = new PriceBook(
+            EssenceCatalogue.MarketItems,
+            () => null,
+            () => _now,
+            () => new NinjaPriceStatus(NinjaPluginState.Disabled, false));
+
+        book.Sample();
+        Assert.Equal(ProviderStatus.Disabled, book.Status);
+        Assert.Equal(NinjaPluginState.Disabled, book.LastDetailedStatus.PluginState);
+        Assert.False(book.LastDetailedStatus.IsEnabled);
+        Assert.True(book.LastDetailedStatus.IsInstalled);
+    }
+
+    [Fact]
+    public void Uninstalled_plugin_reports_not_installed_status()
+    {
+        var book = new PriceBook(
+            EssenceCatalogue.MarketItems,
+            () => null,
+            () => _now,
+            () => new NinjaPriceStatus(NinjaPluginState.NotInstalled, false));
+
+        book.Sample();
+        Assert.Equal(ProviderStatus.NotInstalled, book.Status);
+        Assert.Equal(NinjaPluginState.NotInstalled, book.LastDetailedStatus.PluginState);
+        Assert.False(book.LastDetailedStatus.IsInstalled);
+        Assert.False(book.LastDetailedStatus.IsEnabled);
+    }
+
+    [Fact]
+    public void Failed_compilation_reports_compilation_failure()
+    {
+        var book = new PriceBook(
+            EssenceCatalogue.MarketItems,
+            () => null,
+            () => _now,
+            () => new NinjaPriceStatus(NinjaPluginState.FailedCompilation, false, "syntax error"));
+
+        book.Sample();
+        Assert.Equal(ProviderStatus.FailedCompilation, book.Status);
+        Assert.Equal("syntax error", book.LastDetailedStatus.FailureDetails);
+    }
+
+    [Fact]
+    public void Throwing_status_provider_is_handled_defensively()
+    {
+        var book = new PriceBook(
+            EssenceCatalogue.MarketItems,
+            () => null,
+            () => _now,
+            () => throw new InvalidOperationException("collection was modified"));
+
+        book.Sample();
+        Assert.Equal(ProviderStatus.Unavailable, book.Status);
+    }
 }

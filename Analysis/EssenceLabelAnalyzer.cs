@@ -42,6 +42,15 @@ namespace BetterEssenceCorruptionHelper.Analysis
                         lines.Add(text);
                 }
 
+                // Also check if any other direct child of label.Label has corrupted text (e.g. status badge)
+                for (var i = 0; i < children.Count; i++)
+                {
+                    if (i == 1) continue;
+                    var t = children[i]?.Text;
+                    if (!string.IsNullOrEmpty(t) && t.Contains("corrupted", StringComparison.OrdinalIgnoreCase))
+                        lines.Add("Corrupted");
+                }
+
                 return AnalyzeLines(lines);
             }
             catch (Exception ex)
@@ -53,14 +62,18 @@ namespace BetterEssenceCorruptionHelper.Analysis
 
         /// <summary>
         /// A cheap value that changes whenever the label gains or loses a line (e.g. the "Corrupted" line
-        /// a Vaal Orb adds): the line count of the essence container. One element read instead of
-        /// reading every line's text. -1 when unreadable.
+        /// a Vaal Orb adds) or child elements (e.g. the Remnant button disappearing on corruption).
+        /// One element read instead of reading every line's text. -1 when unreadable.
         /// </summary>
         public static long ReadContentSignature(LabelOnGround label)
         {
             try
             {
-                return label?.Label?.GetChildAtIndex(1)?.ChildCount ?? -1;
+                var children = label?.Label?.Children;
+                if (children == null || children.Count < 2)
+                    return -1;
+
+                return ((long)children.Count << 32) | (uint)(children[1]?.ChildCount ?? 0);
             }
             catch
             {
@@ -94,8 +107,8 @@ namespace BetterEssenceCorruptionHelper.Analysis
                 }
 
                 // Essence names never contain "Corrupted", so this can only be the corruption marker
-                // (matched as loosely as earlier versions did).
-                if (line.Contains("Corrupted", StringComparison.Ordinal))
+                // (matched case-insensitively for "CORRUPTED" / "Corrupted").
+                if (line.Contains("corrupted", StringComparison.OrdinalIgnoreCase))
                     corrupted = true;
             }
 

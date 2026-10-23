@@ -1,4 +1,5 @@
 using BetterEssenceCorruptionHelper.Catalogue;
+using BetterEssenceCorruptionHelper.Pricing;
 using BetterEssenceCorruptionHelper.Strategy;
 using System;
 using System.Collections.Generic;
@@ -83,9 +84,10 @@ namespace BetterEssenceCorruptionHelper.Analysis
     /// <para>
     /// <see cref="CorruptionAssessment.ExpectedNetGain"/> - what the Profit strategy decides on - counts
     /// every outcome the setup allows as equally likely (the plain reading of "chosen at random"), and
-    /// the random picks inside an outcome too. The added essence's type and tier are undocumented, so
-    /// that outcome counts at its lower bound (it adds nothing). When real odds are known (e.g. from
-    /// enough observed outcomes in the corruption log) they can go through <see cref="ExpectedValue"/>.
+    /// the random picks inside an outcome too. The added essence's type and tier are drawn from natural
+    /// (Group A–E) essences at the tiers matching the monster's eligible natural pool. When real odds
+    /// are known (e.g. from enough observed outcomes in the corruption log) they can go through
+    /// <see cref="ExpectedValue"/>.
     /// </para>
     ///
     /// <para>
@@ -166,7 +168,7 @@ namespace BetterEssenceCorruptionHelper.Analysis
                 {
                     CorruptionOutcome.NoChange => new OutcomeRange(outcome, 0, 0, 0),
                     CorruptionOutcome.TierUpgrade => TierUpgrade(essences, P),
-                    CorruptionOutcome.AddEssence => AddEssence(price, unpriced),
+                    CorruptionOutcome.AddEssence => AddEssence(essences, price, unpriced),
                     CorruptionOutcome.Transform => Transform(essences, P),
                     CorruptionOutcome.ResonanceReplace => ResonanceReplace(essences, current, P),
                     _ => throw new ArgumentOutOfRangeException(nameof(outcome)),
@@ -247,21 +249,43 @@ namespace BetterEssenceCorruptionHelper.Analysis
             return new OutcomeRange(CorruptionOutcome.TierUpgrade, gain, gain, gain);
         }
 
-        private static OutcomeRange AddEssence(Func<EssenceEntry, double?> price, ISet<string> unpriced)
+        private static OutcomeRange AddEssence(IReadOnlyList<EssenceEntry> essences, Func<EssenceEntry, double?> price, ISet<string> unpriced)
         {
             // Prices are never negative, so adding an essence can't lose value; the cap is the priciest
-            // natural essence. Which type/tier gets added is undocumented, so there is no mean.
+            // natural essence.
             var cap = MaxNaturalPrice(price, out var unpricedNaturals);
             if (unpricedNaturals > 0)
                 unpriced.Add($"added-essence cap ignores {unpricedNaturals} unlisted essence(s)");
 
-            return new OutcomeRange(CorruptionOutcome.AddEssence, 0, cap, null);
+            // Candidate tiers reflect the natural tiers that can spawn in the area. Natural spawns
+            // cap at Shrieking (Deafening requires corruption or an Ascent scarab).
+            var tiers = essences
+                .Select(e => e.Tier == EssenceTier.Deafening ? EssenceTier.Shrieking : e.Tier)
+                .Where(t => t != EssenceTier.Corrupted)
+                .Distinct()
+                .ToHashSet();
+
+            if (tiers.Count == 0)
+                tiers.Add(EssenceTier.Shrieking);
+
+            var candidates = EssenceCatalogue.All
+                .Where(e => e.Group != EssenceGroup.F && tiers.Contains(e.Tier))
+                .ToList();
+
+            double expected = 0;
+            if (candidates.Count > 0)
+            {
+                var values = candidates.Select(c => price(c) ?? EssenceValues.CheapValue).ToList();
+                expected = Median(values);
+            }
+
+            return new OutcomeRange(CorruptionOutcome.AddEssence, 0, cap, expected);
         }
 
         private static OutcomeRange Transform(IReadOnlyList<EssenceEntry> essences, Func<EssenceEntry, double> price)
         {
             // Each essence transforms independently, so the sum of per-essence extremes is attainable.
-            double min = 0, max = 0, mean = 0;
+            double min = 0, max = 0, expected = 0;
             foreach (var e in essences)
             {
                 var candidates = EssenceCatalogue.TransformCandidates(e);
@@ -269,21 +293,34 @@ namespace BetterEssenceCorruptionHelper.Analysis
                     continue;
 
                 var own = price(e);
-                double cMin = double.MaxValue, cMax = double.MinValue, cSum = 0;
+                double cMin = double.MaxValue, cMax = double.MinValue;
+                var netGains = new List<double>(candidates.Count);
                 foreach (var c in candidates)
                 {
                     var p = price(c);
                     cMin = Math.Min(cMin, p);
                     cMax = Math.Max(cMax, p);
-                    cSum += p;
+                    netGains.Add(p - own);
                 }
 
                 min += cMin - own;
                 max += cMax - own;
-                mean += cSum / candidates.Count - own;
+                expected += Median(netGains);
             }
 
-            return new OutcomeRange(CorruptionOutcome.Transform, min, max, mean);
+            return new OutcomeRange(CorruptionOutcome.Transform, min, max, expected);
+        }
+
+        /// <summary>
+        /// Robust median of candidate values, protecting the expected value from single illiquid or
+        /// troll market listings (e.g. at end of league without assuming an efficient market).
+        /// </summary>
+        private static double Median(IReadOnlyList<double> values)
+        {
+            if (values.Count == 0) return 0;
+            var sorted = values.OrderBy(v => v).ToList();
+            var mid = sorted.Count / 2;
+            return sorted.Count % 2 != 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2.0;
         }
 
         private static OutcomeRange ResonanceReplace(IReadOnlyList<EssenceEntry> essences, double current, Func<EssenceEntry, double> price)

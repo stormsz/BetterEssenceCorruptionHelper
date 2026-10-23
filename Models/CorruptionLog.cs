@@ -49,6 +49,12 @@ namespace BetterEssenceCorruptionHelper.Models
         private readonly Dictionary<CorruptionOutcome, int> _counts = new();
 
         public int Total { get; private set; }
+        public int RecommendedCorruptions { get; private set; }
+        public int MistakenCorruptions { get; private set; }
+        public int TotalMissed { get; private set; }
+        public int TotalKilled { get; private set; }
+        public int TotalMistakes => MistakenCorruptions + TotalMissed;
+
         public int Unclassified { get; private set; }
         public double RealizedGainSum { get; private set; }
         public int RealizedGainCount { get; private set; }
@@ -64,6 +70,11 @@ namespace BetterEssenceCorruptionHelper.Models
         public string? Record(CorruptionRecord record, string? csvPath)
         {
             Total++;
+            if (record.WasRecommended)
+                RecommendedCorruptions++;
+            else
+                MistakenCorruptions++;
+
             if (record.Outcome is { } outcome)
                 _counts[outcome] = CountOf(outcome) + 1;
             else
@@ -97,6 +108,33 @@ namespace BetterEssenceCorruptionHelper.Models
             {
                 return ex.Message;
             }
+        }
+
+        public void RecordMissed()
+        {
+            TotalMissed++;
+            Version++;
+        }
+
+        public void RecordKill()
+        {
+            TotalKilled++;
+            Version++;
+        }
+
+        public void ResetSession()
+        {
+            Total = 0;
+            RecommendedCorruptions = 0;
+            MistakenCorruptions = 0;
+            TotalMissed = 0;
+            TotalKilled = 0;
+            Unclassified = 0;
+            RealizedGainSum = 0;
+            RealizedGainCount = 0;
+            _counts.Clear();
+            _recent.Clear();
+            Version++;
         }
 
         public static string ToCsvLine(CorruptionRecord r)

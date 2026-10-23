@@ -376,10 +376,9 @@ namespace BetterEssenceCorruptionHelper
                 var targetable = entity.IsTargetable;
 
                 // "Opened" means the monster was released. On 3.29 the Monolith component's
-                // IsOpened/OpenStage never change (confirmed with the diagnostics log), so - like
-                // AutoExile, a bot built on this same HUD - the monolith turning untargetable is
-                // the signal that actually fires.
-                var isOpenedNow = monolith.IsOpened || !targetable;
+                // IsOpened/OpenStage never change (confirmed with diagnostics), so the monolith
+                // turning untargetable is the signal that actually fires.
+                var isOpenedNow = !targetable;
 
                 if (!_trackedEntities.TryGetValue(id, out var data))
                 {
@@ -429,6 +428,7 @@ namespace BetterEssenceCorruptionHelper
                 EntityId = ++_entityIdCounter,
                 Address = entity.Address,
                 Entity = entity,
+                WasSeenClosed = true,
             };
 
             _trackedEntities[entity.Id] = newData;
@@ -594,11 +594,25 @@ namespace BetterEssenceCorruptionHelper
                 data.AnalysisVersion++;
             }
 
-            // Detect corruption event (uncorrupted -> corrupted). Requires an earlier valid uncorrupted
-            // reading, so a monster that was already corrupted when first seen (e.g. coming back from
-            // the hideout) is not counted again.
-            if (previous.IsValid && !previous.IsCorrupted && newAnalysis.IsCorrupted)
+            // Detect corruption event:
+            // 1. Label says corrupted (case-insensitive)
+            // 2. OR the essences on the closed monolith changed (tiers increased, essence added, or transformed)
+            var essencesChanged = previous.IsValid && previous.EssenceCount > 0 && newAnalysis.IsValid && newAnalysis.EssenceCount > 0 &&
+                !newAnalysis.SameContentAs(previous);
+
+            var isCorrupted = newAnalysis.IsCorrupted || essencesChanged;
+
+            if (previous.IsValid && !previous.IsCorrupted && isCorrupted)
+            {
+                if (!newAnalysis.IsCorrupted)
+                {
+                    newAnalysis = new EssenceAnalysis(newAnalysis.IsValid, true, newAnalysis.Essences,
+                        newAnalysis.UnrecognizedEssenceLines, newAnalysis.UnresolvedTypes);
+                    data.Analysis = newAnalysis;
+                }
+
                 HandleEssenceCorruption(data, previous, newAnalysis, oldState);
+            }
 
             ApplyRecommendation(data, StrategyEvaluator.Evaluate(data.Analysis, _settings.Tracking, CurrentProfitContext()));
         }
@@ -614,42 +628,29 @@ namespace BetterEssenceCorruptionHelper
         }
 
         /// <summary>
-        /// Handles essence corruption event and tracks statistics.
+        /// Handles essence corruption event. Staged as pending on the entity, committed only when the monster is killed.
         /// </summary>
         private void HandleEssenceCorruption(EssenceEntityData data, EssenceAnalysis before, EssenceAnalysis after, EssenceState oldState)
         {
             data.WasCorruptedByPlayer = true;
             data.PreviousAnalysis = before; // pre-corruption state for the debug comparison
 
+            if (oldState == EssenceState.None && before.IsValid)
+            {
+                var rec = StrategyEvaluator.Evaluate(before, _settings.Tracking, CurrentProfitContext());
+                oldState = rec.State;
+            }
+
+            var wasRecommended = oldState == EssenceState.ShouldCorrupt;
+            data.PendingCorruption = new PendingCorruptionOutcome(before, after, wasRecommended, oldState);
+            data.PendingMissed = false;
+
             if (_settings.Debug.ShowDebugInfo.Value)
             {
                 DebugWindow.LogMsg(
-                    $"Essence {data.EntityId} (0x{data.Address:X}) corrupted. State before: {oldState}", 3, SharpDX.Color.Yellow);
+                    $"Essence {data.EntityId} (0x{data.Address:X}) corrupted (pending kill). Recommended: {wasRecommended}", 3,
+                    wasRecommended ? SharpDX.Color.LightGreen : SharpDX.Color.OrangeRed);
             }
-
-            // Track outcome based on what previous state was
-            if (oldState == EssenceState.ShouldCorrupt)
-            {
-                // Good corruption - essence was valuable
-                _mapStats.IncrementCorrupted();
-
-                if (_settings.Debug.ShowDebugInfo.Value)
-                {
-                    DebugWindow.LogMsg($"SUCCESSFUL CORRUPTION: Essence {data.EntityId} (0x{data.Address:X})", 3, SharpDX.Color.LightGreen);
-                }
-            }
-            else if (oldState == EssenceState.ShouldKill)
-            {
-                // Bad corruption - essence wasn't valuable enough to corrupt
-                _mapStats.IncrementMistakes();
-
-                if (_settings.Debug.ShowDebugInfo.Value)
-                {
-                    DebugWindow.LogMsg($"MISTAKEN CORRUPTION: Essence {data.EntityId} (0x{data.Address:X}) should have been killed!", 3, SharpDX.Color.OrangeRed);
-                }
-            }
-
-            RecordOutcome(data, before, after, oldState == EssenceState.ShouldCorrupt);
         }
 
         /// <summary>Classifies what the Vaal Orb did and records it with the prices of the moment.</summary>
@@ -710,13 +711,17 @@ namespace BetterEssenceCorruptionHelper
         /// </summary>
         private void HandleEssenceOpened(EssenceEntityData data)
         {
+            if (data.IsOpened)
+                return;
+
             data.IsOpened = true;
 
             // Check if player missed a corruption opportunity (must run before State is cleared)
             if (IsMissedCorruption(data))
             {
-                _mapStats.IncrementMissed();
-                DebugWindow.LogMsg($"MISSED CORRUPTION: Essence {data.EntityId} (0x{data.Address:X}) should have been corrupted before releasing it", 3, SharpDX.Color.Orange);
+                data.PendingMissed = true;
+                if (_settings.Debug.ShowDebugInfo.Value)
+                    DebugWindow.LogMsg($"MISSED CORRUPTION: Essence {data.EntityId} (0x{data.Address:X}) opened uncorrupted (pending kill)", 3, SharpDX.Color.Orange);
             }
             else if (_settings.Debug.ShowDebugInfo.Value)
             {
@@ -992,8 +997,41 @@ namespace BetterEssenceCorruptionHelper
         /// <summary>The released essence monster died - this is the "killed" event.</summary>
         private void HandleMonsterKilled(EssenceEntityData data, string signal)
         {
+            if (!data.IsOpened)
+                HandleEssenceOpened(data);
+
             data.MonsterKilled = true;
+
+            // Commit pending corruption or missed outcome now that the monster is confirmed dead
+            if (data.PendingCorruption is { } pending)
+            {
+                if (pending.WasRecommended)
+                {
+                    _mapStats.IncrementCorrupted();
+                    if (_settings.Debug.ShowDebugInfo.Value)
+                        DebugWindow.LogMsg($"SUCCESSFUL CORRUPTION CONFIRMED: Essence {data.EntityId} killed", 3, SharpDX.Color.LightGreen);
+                }
+                else
+                {
+                    _mapStats.IncrementMistakes();
+                    if (_settings.Debug.ShowDebugInfo.Value)
+                        DebugWindow.LogMsg($"MISTAKEN CORRUPTION CONFIRMED: Essence {data.EntityId} killed", 3, SharpDX.Color.OrangeRed);
+                }
+
+                RecordOutcome(data, pending.Before, pending.After, pending.WasRecommended);
+                data.PendingCorruption = null;
+            }
+            else if (data.PendingMissed)
+            {
+                _mapStats.IncrementMissed();
+                _corruptionLog.RecordMissed();
+                if (_settings.Debug.ShowDebugInfo.Value)
+                    DebugWindow.LogMsg($"MISSED CORRUPTION CONFIRMED: Essence {data.EntityId} killed without corrupting", 3, SharpDX.Color.Orange);
+                data.PendingMissed = false;
+            }
+
             _mapStats.IncrementKilled();
+            _corruptionLog.RecordKill();
 
             if (_settings.Debug.ShowDebugInfo.Value)
                 DebugWindow.LogMsg($"Essence {data.EntityId}: monster killed ({signal})", 3, SharpDX.Color.Cyan);
@@ -1002,10 +1040,20 @@ namespace BetterEssenceCorruptionHelper
         /// <summary>
         /// Checks if player missed a corruption opportunity.
         /// </summary>
-        private static bool IsMissedCorruption(EssenceEntityData data) =>
-            data.State == EssenceState.ShouldCorrupt &&
-            !data.Analysis.IsCorrupted &&
-            !data.WasCorruptedByPlayer;
+        private bool IsMissedCorruption(EssenceEntityData data)
+        {
+            if (data.WasCorruptedByPlayer || data.Analysis.IsCorrupted)
+                return false;
+
+            var state = data.State;
+            if (state == EssenceState.None && data.Analysis.IsValid)
+            {
+                var rec = StrategyEvaluator.Evaluate(data.Analysis, _settings.Tracking, CurrentProfitContext());
+                state = rec.State;
+            }
+
+            return state == EssenceState.ShouldCorrupt;
+        }
 
         #endregion
 
@@ -1158,6 +1206,16 @@ namespace BetterEssenceCorruptionHelper
                 var distance = Vector2.Distance(position, data.GridPos!.Value);
                 if (distance > MONSTER_LINK_RADIUS)
                     continue;
+
+                if (data.MonsterId == null && monster.IsAlive)
+                {
+                    data.MonsterId = monster.Id;
+                    data.Monster = monster;
+                    _byMonsterId[monster.Id] = data;
+                    if (DiagnosticsOn)
+                        LogDiagnostic($"#{data.EntityId}: linked released monster id={monster.Id} ({monster.RenderName}) {distance:F1} grid away");
+                    return;
+                }
 
                 _reportedNearbyMonsters.Add(monster.Id);
                 LogDiagnostic($"#{data.EntityId}: other monster near released monolith: id={monster.Id} ({monster.RenderName}, {monster.Rarity}, {distance:F1} grid away) {DescribeMonster(monster)}");

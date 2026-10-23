@@ -41,6 +41,9 @@ namespace BetterEssenceCorruptionHelper.Pricing
     {
         NotChecked,
         Unavailable,
+        Disabled,
+        NotInstalled,
+        FailedCompilation,
         Loading,
         Ready,
 
@@ -97,15 +100,21 @@ namespace BetterEssenceCorruptionHelper.Pricing
         private readonly PriceInfo[] _prices;
         private readonly Func<PriceQuery?> _resolveProvider;
         private readonly Func<long> _clockMs;
+        private readonly Func<NinjaPriceStatus>? _statusProvider;
 
         private PriceQuery? _query;
         private long _nextSampleMs;
 
-        public PriceBook(IReadOnlyList<MarketItem> items, Func<PriceQuery?> resolveProvider, Func<long> clockMs)
+        public PriceBook(
+            IReadOnlyList<MarketItem> items,
+            Func<PriceQuery?> resolveProvider,
+            Func<long> clockMs,
+            Func<NinjaPriceStatus>? statusProvider = null)
         {
             _items = items;
             _resolveProvider = resolveProvider;
             _clockMs = clockMs;
+            _statusProvider = statusProvider;
             _prices = new PriceInfo[items.Count];
             for (var i = 0; i < items.Count; i++)
             {
@@ -120,6 +129,21 @@ namespace BetterEssenceCorruptionHelper.Pricing
         public int Version { get; private set; }
 
         public ProviderStatus Status { get; private set; } = ProviderStatus.NotChecked;
+
+        /// <summary>Detailed plugin & bridge status from the latest query, if a status provider was supplied.</summary>
+        public NinjaPriceStatus LastDetailedStatus { get; private set; }
+
+        private NinjaPriceStatus QueryDetailedStatus()
+        {
+            try
+            {
+                return _statusProvider?.Invoke() ?? default;
+            }
+            catch
+            {
+                return default;
+            }
+        }
 
         /// <summary>Clock time of the latest sample, or null before the first one.</summary>
         public long? LastSampleMs { get; private set; }
@@ -178,7 +202,15 @@ namespace BetterEssenceCorruptionHelper.Pricing
                     _prices[i] = Degrade(_prices[i], PriceState.ProviderUnavailable, now);
 
                 failed = _prices.Length;
-                Status = ProviderStatus.Unavailable;
+                var detailed = QueryDetailedStatus();
+                LastDetailedStatus = detailed;
+                Status = detailed.PluginState switch
+                {
+                    NinjaPluginState.Disabled => ProviderStatus.Disabled,
+                    NinjaPluginState.NotInstalled => ProviderStatus.NotInstalled,
+                    NinjaPluginState.FailedCompilation => ProviderStatus.FailedCompilation,
+                    _ => ProviderStatus.Unavailable,
+                };
             }
             else
             {
@@ -237,7 +269,15 @@ namespace BetterEssenceCorruptionHelper.Pricing
                 if (failed == _items.Count && listed == 0 && zeroes.Count == 0)
                 {
                     _query = null;
-                    Status = ProviderStatus.Unavailable;
+                    var detailed = _statusProvider?.Invoke() ?? default;
+                    LastDetailedStatus = detailed;
+                    Status = detailed.PluginState switch
+                    {
+                        NinjaPluginState.Disabled => ProviderStatus.Disabled,
+                        NinjaPluginState.NotInstalled => ProviderStatus.NotInstalled,
+                        NinjaPluginState.FailedCompilation => ProviderStatus.FailedCompilation,
+                        _ => ProviderStatus.Unavailable,
+                    };
                 }
             }
 

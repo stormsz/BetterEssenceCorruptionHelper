@@ -28,8 +28,9 @@ namespace BetterEssenceCorruptionHelper
     /// <param name="values">Complete essence values built from the price snapshot</param>
     /// <param name="setup">Map setup read from the game</param>
     /// <param name="corruptionLog">Observed corruption outcomes</param>
+    /// <param name="icons">Essence and currency icons</param>
     internal class EssenceRenderer(GameController gameController, Settings settings, MapStatistics mapStats, EssenceEntityTracker entityTracker,
-        PriceBook prices, EssenceValues values, SetupDetector setup, CorruptionLog corruptionLog)
+        PriceBook prices, EssenceValues values, SetupDetector setup, CorruptionLog corruptionLog, EssenceIcons? icons = null)
     {
         #region Fields
 
@@ -41,9 +42,10 @@ namespace BetterEssenceCorruptionHelper
         private readonly EssenceValues _values = values;
         private readonly SetupDetector _setup = setup;
         private readonly CorruptionLog _corruptionLog = corruptionLog;
+        private readonly EssenceIcons? _icons = icons;
 
         /// <summary>Debug overlay content per essence, rebuilt only when its inputs change.</summary>
-        private readonly Dictionary<uint, (int Key, List<List<(string text, Color color)>> Lines, float Width)> _debugCache = new();
+        private readonly Dictionary<uint, (int Key, List<DebugLine> Lines, float Width)> _debugCache = new();
 
         private (int, int, int, int) _statsKey = (-1, -1, -1, -1);
         private readonly List<(string Text, Color Color)> _statsLines = new();
@@ -86,11 +88,15 @@ namespace BetterEssenceCorruptionHelper
 
             foreach (var data in _entityTracker.TrackedEntities)
             {
-                DrawEssenceIndicator(data);
+                var rect = GetDrawRect(data);
+                if (rect is not { } drawRect)
+                    continue;
+
+                DrawEssenceIndicator(data, drawRect);
 
                 // Draw debug window for this specific essence if enabled
-                if (showDebug && data.Label?.Label != null)
-                    DrawEssenceDebugWindow(data);
+                if (showDebug)
+                    DrawEssenceDebugWindow(data, drawRect);
             }
         }
 
@@ -145,10 +151,14 @@ namespace BetterEssenceCorruptionHelper
             if (children == null || children.Count == 0)
                 return root.GetClientRectCache;
 
+            // Child 0 is the card background, Child 1 is the text container.
+            // Any further children (index >= 2) are interaction buttons (such as the Remnant of
+            // Corruption button below the card) which must not expand the card boundary.
+            var count = Math.Min(children.Count, 2);
             var found = false;
             float left = 0, top = 0, right = 0, bottom = 0;
 
-            for (var i = 0; i < children.Count; i++)
+            for (var i = 0; i < count; i++)
             {
                 var child = children[i];
                 if (child == null)
@@ -212,7 +222,7 @@ namespace BetterEssenceCorruptionHelper
         /// <summary>
         /// Draws indicators (border + text) for a single essence based on its state.
         /// </summary>
-        private void DrawEssenceIndicator(EssenceEntityData data)
+        private void DrawEssenceIndicator(EssenceEntityData data, RectangleF drawRect)
         {
             var state = data.State;
 
@@ -228,11 +238,6 @@ namespace BetterEssenceCorruptionHelper
 
             var showValue = _settings.Indicators.ShowValueRange.Value;
             if (!indicator.DrawBorder.Value && !indicator.DrawText.Value && !showValue)
-                return;
-
-            // Resolve geometry once and share it between the box and the text.
-            var rect = GetDrawRect(data);
-            if (rect is not { } drawRect)
                 return;
 
             var isCorruptTarget = state == EssenceState.ShouldCorrupt;
@@ -321,12 +326,8 @@ namespace BetterEssenceCorruptionHelper
         /// <summary>
         /// Draws debug window for a SPECIFIC essence showing detailed analysis.
         /// </summary>
-        private void DrawEssenceDebugWindow(EssenceEntityData data)
+        private void DrawEssenceDebugWindow(EssenceEntityData data, RectangleF cardRect)
         {
-            if (data.Label?.Label == null)
-                return;
-
-            var rect = data.Label.Label.GetClientRectCache;
             var assessment = GetAssessment(data);
 
             var key = System.HashCode.Combine(data.AnalysisVersion, data.State, data.MonsterId, data.WasCorruptedByPlayer,
@@ -335,11 +336,21 @@ namespace BetterEssenceCorruptionHelper
             {
                 var lines = BuildDebugContent(data, assessment);
                 var width = 0f;
-                foreach (var segments in lines)
+                var iconSize = ImGui.GetTextLineHeight();
+                if (iconSize <= 0) iconSize = 14f;
+
+                foreach (var line in lines)
                 {
                     var lineWidth = 0f;
-                    foreach (var (text, _) in segments)
+                    if (line.Prefix is { } p)
+                        lineWidth += ImGui.CalcTextSize(p.Text).X;
+
+                    if (line.Icon != null)
+                        lineWidth += iconSize + 4f;
+
+                    foreach (var (text, _) in line.Segments)
                         lineWidth += ImGui.CalcTextSize(text).X;
+
                     if (lineWidth > width)
                         width = lineWidth;
                 }
@@ -350,8 +361,8 @@ namespace BetterEssenceCorruptionHelper
 
             var debugLines = cached.Lines;
 
-            // Position flush to right edge of status box
-            var debugWindowPos = new Vector2(rect.Right - 40, rect.Top);
+            // Position flush to right edge of monolith card
+            var debugWindowPos = new Vector2(cardRect.Right + 5f, cardRect.Top);
 
             // UNIQUE window ID for THIS SPECIFIC essence
             var windowName = $"###EssenceDebug_{data.EntityId}";
@@ -370,9 +381,18 @@ namespace BetterEssenceCorruptionHelper
             ImGui.PushStyleColor(ImGuiCol.WindowBg, ToImguiVec4(bgColor));
             ImGui.PushStyleColor(ImGuiCol.Border, ToImguiVec4(_settings.Debug.DebugBorderColor.Value));
             ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 1.0f);
+            ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(8f, 6f));
+            ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(4f, 2f));
 
-            // Set window dimensions (minimum width 260px, dynamic height)
-            var windowSize = new Vector2(Math.Max(260, cached.Width + 15), 10 + (debugLines.Count * 16));
+            // Set window dimensions:
+            // Width clamped to avoid screen stretching while fitting content.
+            // Height matches monolith card Y space, expanding only if needed to prevent clipping.
+            var lineHeight = ImGui.GetTextLineHeightWithSpacing();
+            if (lineHeight <= 0) lineHeight = 16f;
+            var neededHeight = 12f + (debugLines.Count * lineHeight);
+            var windowHeight = Math.Max(cardRect.Height, neededHeight);
+            var windowWidth = Math.Max(260f, cached.Width + 24f);
+            var windowSize = new Vector2(windowWidth, windowHeight);
 
             // Set position and size BEFORE Begin()
             ImGui.SetNextWindowPos(debugWindowPos);
@@ -383,28 +403,48 @@ namespace BetterEssenceCorruptionHelper
             // body is conditional. Skipping it corrupts the window stack.
             if (ImGui.Begin(windowName, windowFlags))
             {
-                // Draw each line of debug information
-                foreach (var segments in debugLines)
-                {
-                    // Draw all segments on same line
-                    for (var i = 0; i < segments.Count; i++)
-                    {
-                        var (text, color) = segments[i];
+                var iconSize = ImGui.GetTextLineHeight();
+                if (iconSize <= 0) iconSize = 14f;
 
-                        if (i > 0)
-                            ImGui.SameLine(0, 0); // No spacing between segments
+                // Draw each line of debug information
+                foreach (var line in debugLines)
+                {
+                    var hasPrefix = false;
+
+                    if (line.Prefix is { } p)
+                    {
+                        ImGui.TextColored(ToImguiVec4(p.Color), p.Text);
+                        hasPrefix = true;
+                    }
+
+                    if (line.Icon is { } icon)
+                    {
+                        if (hasPrefix)
+                            ImGui.SameLine(0, 0);
+
+                        ImGui.Image(icon, new Vector2(iconSize, iconSize));
+                        ImGui.SameLine(0, 4);
+                        hasPrefix = true;
+                    }
+
+                    for (var i = 0; i < line.Segments.Count; i++)
+                    {
+                        var (text, color) = line.Segments[i];
+
+                        if (i > 0 || hasPrefix)
+                            ImGui.SameLine(0, 0);
 
                         ImGui.TextColored(ToImguiVec4(color), text);
                     }
 
-                    if (segments.Count == 0)
+                    if (!hasPrefix && line.Segments.Count == 0)
                         ImGui.Text("");
                 }
             }
 
             ImGui.End();
 
-            ImGui.PopStyleVar();
+            ImGui.PopStyleVar(3);
             ImGui.PopStyleColor(2);
         }
 
@@ -458,43 +498,73 @@ namespace BetterEssenceCorruptionHelper
             _statsLines.Clear();
             var statColor = _settings.MapStats.TextColor.Value;
 
-            // Display statistics
+            // Map Totals
             _statsLines.Add(($"  Killed: {_mapStats.TotalKilled}", statColor));
             _statsLines.Add(($"  Corrupted: {_mapStats.TotalCorrupted}", statColor));
-            _statsLines.Add(($"  Missed: {_mapStats.TotalMissed}", statColor));
-            _statsLines.Add(($"  Mistakes: {_mapStats.TotalMistakes}", statColor));
+            _statsLines.Add(($"  Missed: {_mapStats.TotalMissed}", _mapStats.TotalMissed > 0 ? Color.Orange : statColor));
+            _statsLines.Add(($"  Wrongly corrupted: {_mapStats.TotalMistakes}", _mapStats.TotalMistakes > 0 ? Color.OrangeRed : statColor));
 
             _statsLines.Add(("", statColor));
             _statsLines.Add(($"Strategy: {_settings.Tracking.Strategy.DisplayName}", Color.LightSkyBlue));
             if (SetupStatus.Describe(_settings.Tracking.Strategy, _setup) is { } warning)
                 _statsLines.Add((warning.Title, warning.Level == SetupStatus.Level.Problem ? Color.OrangeRed : Color.Yellow));
 
-            if (_corruptionLog.Total == 0)
-                return;
+            // Session Totals
+            _statsLines.Add(("", statColor));
+            _statsLines.Add(("Session Totals", Color.White));
+            _statsLines.Add(($"  Killed: {_corruptionLog.TotalKilled}", statColor));
 
-            _statsLines.Add(($"Session corruptions: {_corruptionLog.Total}", Color.White));
-            var parts = new List<string>();
-            foreach (var outcome in System.Enum.GetValues<CorruptionOutcome>())
-            {
-                var count = _corruptionLog.CountOf(outcome);
-                if (count > 0)
-                    parts.Add($"{OutcomeName(outcome)} {count}");
-            }
-            if (_corruptionLog.Unclassified > 0)
-                parts.Add($"unclassified {_corruptionLog.Unclassified}");
-            _statsLines.Add(($"  {string.Join(" · ", parts)}", statColor));
+            var corruptLine = _corruptionLog.MistakenCorruptions > 0
+                ? $"  Corrupted: {_corruptionLog.Total} ({_corruptionLog.RecommendedCorruptions} ok · {_corruptionLog.MistakenCorruptions} wrong)"
+                : $"  Corrupted: {_corruptionLog.Total}";
+            _statsLines.Add((corruptLine, statColor));
 
-            if (_corruptionLog.RealizedGainCount > 0)
+            _statsLines.Add(($"  Missed: {_corruptionLog.TotalMissed}", _corruptionLog.TotalMissed > 0 ? Color.Orange : statColor));
+
+            var totalMistakes = _corruptionLog.TotalMistakes;
+            var mistakeColor = totalMistakes > 0 ? Color.OrangeRed : Color.LightGreen;
+            var mistakeBreakdown = totalMistakes > 0
+                ? $" ({_corruptionLog.MistakenCorruptions} wrong · {_corruptionLog.TotalMissed} missed)"
+                : "";
+            _statsLines.Add(($"  Mistakes: {totalMistakes}{mistakeBreakdown}", mistakeColor));
+
+            if (_corruptionLog.Total > 0)
             {
-                var gain = _corruptionLog.RealizedGainSum;
-                _statsLines.Add(($"  Realised {Format.SignedChaos(gain)} over {_corruptionLog.RealizedGainCount} (listing prices)",
-                    gain >= 0 ? Color.LimeGreen : Color.OrangeRed));
+                var parts = new List<string>();
+                foreach (var outcome in System.Enum.GetValues<CorruptionOutcome>())
+                {
+                    var count = _corruptionLog.CountOf(outcome);
+                    if (count > 0)
+                        parts.Add($"{OutcomeName(outcome)} {count}");
+                }
+                if (_corruptionLog.Unclassified > 0)
+                    parts.Add($"unclassified {_corruptionLog.Unclassified}");
+
+                if (parts.Count > 0)
+                    _statsLines.Add(($"  Outcomes: {string.Join(" · ", parts)}", Color.LightGray));
+
+                if (_corruptionLog.RealizedGainCount > 0)
+                {
+                    var gain = _corruptionLog.RealizedGainSum;
+                    _statsLines.Add(($"  Realised {Format.SignedChaos(gain)} over {_corruptionLog.RealizedGainCount} (listing prices)",
+                        gain >= 0 ? Color.LimeGreen : Color.OrangeRed));
+                }
             }
         }
 
         #endregion
 
         #region Helpers
+
+        /// <summary>One line of text and optional leading icon in the debug overlay.</summary>
+        internal sealed record DebugLine(
+            (string Text, Color Color)? Prefix,
+            nint? Icon,
+            List<(string Text, Color Color)> Segments)
+        {
+            public DebugLine(List<(string Text, Color Color)> segments) : this(null, null, segments) { }
+            public DebugLine(nint? icon, List<(string Text, Color Color)> segments) : this(null, icon, segments) { }
+        }
 
         internal static string OutcomeName(CorruptionOutcome outcome) => outcome switch
         {
@@ -509,9 +579,9 @@ namespace BetterEssenceCorruptionHelper
         /// <summary>
         /// Builds debug content as list of lines.
         /// </summary>
-        private List<List<(string text, Color color)>> BuildDebugContent(EssenceEntityData data, CorruptionAssessment? assessment)
+        private List<DebugLine> BuildDebugContent(EssenceEntityData data, CorruptionAssessment? assessment)
         {
-            var lines = new List<List<(string, Color)>>();
+            var lines = new List<DebugLine>();
 
             AddDebugHeader(lines, data);
             AddDebugEntityInfo(lines, data);
@@ -524,7 +594,7 @@ namespace BetterEssenceCorruptionHelper
         /// <summary>
         /// Adds debug header showing essence ID and status.
         /// </summary>
-        private static void AddDebugHeader(List<List<(string, Color)>> lines, EssenceEntityData data)
+        private static void AddDebugHeader(List<DebugLine> lines, EssenceEntityData data)
         {
             var (stateString, stateColor) = data.State switch
             {
@@ -533,31 +603,46 @@ namespace BetterEssenceCorruptionHelper
                 _ => ("UNKNOWN", Color.Gray)
             };
 
-            lines.Add([($"Essence #{data.EntityId}", Color.White)]);
-            lines.Add([("Status: ", Color.White), (stateString, stateColor), ($" ({data.StateReason})", Color.Gray)]);
+            var header = new List<(string, Color)>
+            {
+                ($"Essence #{data.EntityId} · ", Color.White),
+                (stateString, stateColor),
+                ($" ({data.StateReason})", Color.Gray)
+            };
 
             if (data.WasCorruptedByPlayer)
-                lines.Add([("Player Corrupted: ", Color.White), ("Yes", Color.Yellow)]);
+                header.Add((" [Corrupted]", Color.Yellow));
 
-            lines.Add([]); // Empty line for spacing
+            lines.Add(new DebugLine(header));
         }
 
         /// <summary>
         /// Adds debug info showing the entity identity and the trapped monster linked to it - the
         /// monster whose death counts as the kill - so both can be checked against the game.
         /// </summary>
-        private static void AddDebugEntityInfo(List<List<(string, Color)>> lines, EssenceEntityData data)
+        private static void AddDebugEntityInfo(List<DebugLine> lines, EssenceEntityData data)
         {
-            lines.Add([("Id: ", Color.White), ($"{data.Id}", Color.LightSkyBlue)]);
-            lines.Add([("Addr: ", Color.White), ($"0x{data.Address:X12}", Color.LightSkyBlue)]);
-            lines.Add(data.MonsterId is { } monsterId
-                ? [("Monster: ", Color.White), ($"id={monsterId}", Color.LightGreen), ($" {SafeRenderName(data)} ({EssenceEntityTracker.RarityName(data.MonsterRarityRank)})", Color.Gray)]
-                : [("Monster: ", Color.White), ("not linked", Color.OrangeRed)]);
+            var info = new List<(string, Color)>
+            {
+                ("Id: ", Color.White),
+                ($"{data.Id} · ", Color.LightSkyBlue)
+            };
+
+            if (data.MonsterId is { } monsterId)
+            {
+                var monsterName = SafeRenderName(data);
+                var rarity = EssenceEntityTracker.RarityName(data.MonsterRarityRank);
+                info.Add(($"Monster: {monsterName} ({rarity})", Color.LightGreen));
+            }
+            else
+            {
+                info.Add(("Monster: not linked", Color.OrangeRed));
+            }
 
             if (data.GridPos is { } pos)
-                lines.Add([("Grid: ", Color.White), ($"({pos.X:F0}, {pos.Y:F0})", Color.LightYellow)]);
+                info.Add(($" · ({pos.X:F0}, {pos.Y:F0})", Color.LightYellow));
 
-            lines.Add([]); // Empty line for spacing
+            lines.Add(new DebugLine(info));
         }
 
         /// <summary>The linked monster's name; its entity may be stale (unloaded), so a failed read is tolerated.</summary>
@@ -576,11 +661,11 @@ namespace BetterEssenceCorruptionHelper
         /// <summary>
         /// Adds essence analysis details: each essence with its price, before/after when corrupted.
         /// </summary>
-        private void AddDebugAnalysis(List<List<(string, Color)>> lines, EssenceEntityData data)
+        private void AddDebugAnalysis(List<DebugLine> lines, EssenceEntityData data)
         {
             if (!data.Analysis.IsValid)
             {
-                lines.Add([("ANALYSIS: INVALID", Color.Red)]);
+                lines.Add(new DebugLine([("ANALYSIS: INVALID", Color.Red)]));
                 return;
             }
 
@@ -588,65 +673,90 @@ namespace BetterEssenceCorruptionHelper
             {
                 var outcome = OutcomeClassifier.Classify(before.Essences, data.Analysis.Essences, out var ambiguous,
                     CorruptionModel.ApplicableOutcomes(_setup.Resolve()));
-                lines.Add([("ANALYSIS (Before -> After): ", Color.Cyan),
-                    (outcome is { } o ? OutcomeName(o) + (ambiguous ? "?" : "") : "unclassified", Color.Yellow)]);
-                AddEssenceLines(lines, before, "  before ");
-                AddEssenceLines(lines, data.Analysis, "  after  ");
+                lines.Add(new DebugLine([("ANALYSIS (Before -> After): ", Color.Cyan),
+                    (outcome is { } o ? OutcomeName(o) + (ambiguous ? "?" : "") : "unclassified", Color.Yellow)]));
+                AddEssenceLines(lines, before, ("  before ", Color.Gray));
+                AddEssenceLines(lines, data.Analysis, ("  after  ", Color.Gray));
                 return;
             }
 
-            lines.Add([("ANALYSIS: ", Color.Cyan), ($"{data.Analysis.EssenceCount} essences{(data.Analysis.IsCorrupted ? ", corrupted" : "")}", Color.White)]);
-            AddEssenceLines(lines, data.Analysis, "  ");
+            if (data.Analysis.IsCorrupted)
+                lines.Add(new DebugLine([("CORRUPTED: ", Color.Cyan), ($"{data.Analysis.EssenceCount} essences", Color.White)]));
+
+            AddEssenceLines(lines, data.Analysis, null);
         }
 
-        private void AddEssenceLines(List<List<(string, Color)>> lines, EssenceAnalysis analysis, string indent)
+        private void AddEssenceLines(List<DebugLine> lines, EssenceAnalysis analysis, (string Text, Color Color)? prefix)
         {
             foreach (var essence in analysis.Essences)
             {
                 var value = _values.Get(essence);
-                lines.Add([(indent + essence.Name, essence.IsMeds ? Color.Violet : Color.White),
-                    ("  " + Format.Value(value), value.Source == ValueSource.Market ? Color.LightGreen : Color.Gray)]);
+                var icon = _icons?.For(essence.TypeName);
+                lines.Add(new DebugLine(prefix, icon,
+                [
+                    (essence.Name, essence.IsMeds ? Color.Violet : Color.White),
+                    ("  " + Format.Value(value), value.Source == ValueSource.Market ? Color.LightGreen : Color.Gray)
+                ]));
             }
 
             foreach (var line in analysis.UnrecognizedEssenceLines)
-                lines.Add([(indent + line, Color.Orange), ("  (not in catalogue)", Color.Gray)]);
+                lines.Add(new DebugLine(prefix, null, [(line, Color.Orange), ("  (not in catalogue)", Color.Gray)]));
         }
 
         /// <summary>Adds the corruption value analysis: per-outcome ranges, bounds and verdict.</summary>
-        private static void AddDebugAssessment(List<List<(string, Color)>> lines, EssenceEntityData data, CorruptionAssessment? assessment)
+        private void AddDebugAssessment(List<DebugLine> lines, EssenceEntityData data, CorruptionAssessment? assessment)
         {
             if (data.Analysis.IsCorrupted || !data.Analysis.IsValid)
                 return;
 
-            lines.Add([]);
+            var vaalIcon = _icons?.For("Vaal");
+
             if (assessment == null)
             {
-                lines.Add([("VAAL ORB VALUE: ", Color.Cyan), (data.AssessmentUnavailableReason ?? "unavailable", Color.Gray)]);
+                lines.Add(new DebugLine(vaalIcon, [
+                    ("Corrupt EV: ", Color.Cyan),
+                    (data.AssessmentUnavailableReason ?? "unavailable", Color.Gray)
+                ]));
                 return;
             }
 
-            lines.Add([("VAAL ORB VALUE ", Color.Cyan), ($"(now {Format.Chaos(assessment.CurrentValue)}, orb {Format.Chaos(assessment.VaalOrbCost)})", Color.Gray)]);
+            lines.Add(new DebugLine(vaalIcon, [
+                ("Corrupt EV ", Color.Cyan),
+                ($"(Monster: {Format.Chaos(assessment.CurrentValue)} · Vaal: {Format.Chaos(assessment.VaalOrbCost)})", Color.Gray)
+            ]));
+
             foreach (var o in assessment.Outcomes)
             {
                 var range = Math.Abs(o.MaxGain - o.MinGain) < 1e-9
                     ? Format.SignedChaos(o.MinGain)
                     : $"{Format.SignedChaos(o.MinGain)}..{Format.SignedChaos(o.MaxGain)}";
-                lines.Add([($"  {OutcomeName(o.Outcome)}: ", Color.White), (range, Color.LightGray)]);
+                lines.Add(new DebugLine([($"  {OutcomeName(o.Outcome)}: ", Color.White), (range, Color.LightGray)]));
             }
 
-            var (verdictText, verdictColor) = assessment.Verdict switch
-            {
-                CorruptionVerdict.AlwaysGains => ("gains in every outcome", Color.LimeGreen),
-                CorruptionVerdict.AlwaysLoses => ("loses in every outcome", Color.OrangeRed),
-                _ => ("depends on unpublished odds", Color.Yellow),
-            };
-            var approx = assessment.IsApproximate ? " (approx.)" : "";
-            lines.Add([("  net: ", Color.White), ($"{Format.SignedChaos(assessment.WorstNetGain)}..{Format.SignedChaos(assessment.BestNetGain)}, ", Color.LightGray), (verdictText + approx, verdictColor)]);
+            var avgColor = assessment.ExpectedNetGain >= 0 ? Color.LimeGreen : Color.OrangeRed;
+            var avgText = $"(avg {Format.SignedChaos(assessment.ExpectedNetGain)})";
 
-            if (assessment.EstimatedItems.Count > 0)
-                lines.Add([("  estimated: ", Color.Gray), (string.Join(", ", assessment.EstimatedItems), Color.Gray)]);
+            var netSegments = new List<(string, Color)>
+            {
+                ("  net: ", Color.White),
+                ($"{Format.SignedChaos(assessment.WorstNetGain)}..{Format.SignedChaos(assessment.BestNetGain)} ", Color.LightGray),
+                (avgText, avgColor)
+            };
+
+            if (assessment.Verdict == CorruptionVerdict.AlwaysGains)
+                netSegments.Add((" [guaranteed gain]", Color.LimeGreen));
+            else if (assessment.Verdict == CorruptionVerdict.AlwaysLoses)
+                netSegments.Add((" [guaranteed loss]", Color.OrangeRed));
+
+            lines.Add(new DebugLine(netSegments));
+
             if (assessment.UnpricedItems.Count > 0)
-                lines.Add([("  counted as 0c: ", Color.Gray), (string.Join(", ", assessment.UnpricedItems), Color.Gray)]);
+            {
+                var unpText = assessment.UnpricedItems.Count <= 2
+                    ? string.Join(", ", assessment.UnpricedItems)
+                    : $"{assessment.UnpricedItems.Count} items";
+                lines.Add(new DebugLine([("  counted as 0c: ", Color.Gray), (unpText, Color.Gray)]));
+            }
         }
 
         /// <summary>

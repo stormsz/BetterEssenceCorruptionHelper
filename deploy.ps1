@@ -77,7 +77,20 @@ function Initialize-Target([string]$target, [string]$hud, [string]$kind) {
     if (Test-Path $target) {
         if (Test-Path (Join-Path $target $MarkerName)) {
             Write-Host "Replacing previous deploy at $target"
-            if (-not $DryRun) { Remove-Item $target -Recurse -Force }
+            if (-not $DryRun) {
+                try {
+                    Remove-Item $target -Recurse -Force -ErrorAction Stop
+                }
+                catch {
+                    Get-ChildItem -Path $target -Filter "*.dll" | Where-Object { $_.Name -notmatch '\.old-' } | ForEach-Object {
+                        $oldName = "$($_.FullName).old-$(Get-Date -Format 'HHmmss')"
+                        Move-Item $_.FullName $oldName -Force -ErrorAction SilentlyContinue
+                    }
+                    Get-ChildItem -Path $target -Filter "*.pdb" | ForEach-Object {
+                        Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            }
         }
         elseif ($Force) {
             $backupDir = Join-Path $hud 'deploy-backups'

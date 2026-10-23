@@ -56,23 +56,73 @@ public class EssenceValuesTests
     }
 
     [Fact]
-    public void Odd_prices_above_the_tier_above_count_as_cheap()
+    public void Market_prices_above_the_tier_above_are_capped()
     {
         var shrieking = V("Shrieking Essence of Spite");
-        Assert.Equal(ValueSource.Ignored, shrieking.Source);
-        Assert.Equal(EssenceValues.CheapValue, shrieking.Chaos);
+        Assert.Equal(ValueSource.Capped, shrieking.Source);
+        Assert.Equal(9.25, shrieking.Chaos);
         Assert.Equal(92, shrieking.MarketChaos);
-        Assert.Same(E("Deafening Essence of Spite"), shrieking.Basis);
-        Assert.True(shrieking.IsApproximate);
+        Assert.False(shrieking.IsApproximate);
 
-        Assert.Equal(ValueSource.Ignored, V("Weeping Essence of Woe").Source);
+        var weeping = V("Weeping Essence of Woe");
+        Assert.Equal(ValueSource.Capped, weeping.Source);
+        Assert.Equal(1.0, weeping.Chaos);
+        Assert.Equal(15.25, weeping.MarketChaos);
     }
 
     [Fact]
-    public void Small_inversions_at_1c_steps_are_normal()
+    public void Micro_fluctuations_within_margin_are_not_capped()
     {
-        Assert.Equal(ValueSource.Market, V("Wailing Essence of Woe").Source);
-        Assert.Equal(1, V("Wailing Essence of Woe").Chaos);
+        var market = new Dictionary<string, double>
+        {
+            ["Deafening Essence of Fear"] = 7.99,
+            ["Shrieking Essence of Fear"] = 0.74,
+            ["Screaming Essence of Fear"] = 0.75, // only 0.01c higher: normal noise, not capped!
+            ["Wailing Essence of Fear"] = 1.0,
+        };
+
+        var values = EssenceValues.Compute(e => market.TryGetValue(e.Name, out var p) ? p : null, marketReady: true);
+
+        // Screaming is NOT capped because 0.75 <= 0.74 + 1.0
+        var screaming = values[E("Screaming Essence of Fear")];
+        Assert.Equal(ValueSource.Market, screaming.Source);
+        Assert.Equal(0.75, screaming.Chaos);
+
+        // Wailing is NOT capped because 1.0 <= 0.75 + 1.0
+        var wailing = values[E("Wailing Essence of Fear")];
+        Assert.Equal(ValueSource.Market, wailing.Source);
+        Assert.Equal(1.0, wailing.Chaos);
+    }
+
+    [Fact]
+    public void Illiquid_anger_prices_are_capped_protecting_ev()
+    {
+        var market = new Dictionary<string, double>
+        {
+            ["Deafening Essence of Anger"] = 5.4,
+            ["Shrieking Essence of Anger"] = 15.2,
+            ["Screaming Essence of Anger"] = 3.19,
+            ["Wailing Essence of Anger"] = 10.0,
+        };
+
+        var values = EssenceValues.Compute(e => market.TryGetValue(e.Name, out var p) ? p : null, marketReady: true);
+
+        // Shrieking is capped at Deafening (5.4)
+        var shrieking = values[E("Shrieking Essence of Anger")];
+        Assert.Equal(ValueSource.Capped, shrieking.Source);
+        Assert.Equal(5.4, shrieking.Chaos);
+        Assert.Equal(15.2, shrieking.MarketChaos);
+
+        // Screaming remains at market (3.19)
+        var screaming = values[E("Screaming Essence of Anger")];
+        Assert.Equal(ValueSource.Market, screaming.Source);
+        Assert.Equal(3.19, screaming.Chaos);
+
+        // Wailing is capped at Screaming (3.19)
+        var wailing = values[E("Wailing Essence of Anger")];
+        Assert.Equal(ValueSource.Capped, wailing.Source);
+        Assert.Equal(3.19, wailing.Chaos);
+        Assert.Equal(10.0, wailing.MarketChaos);
     }
 
     [Fact]

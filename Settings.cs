@@ -12,18 +12,19 @@ namespace BetterEssenceCorruptionHelper
         public Settings()
         {
             Enable = new ToggleNode(true);
+            CatalogueView = new CustomNode();
             Indicators = new IndicatorSettings();
             MapStats = new MapStatsSettings();
             Debug = new DebugSettings();
-            Catalogue = new EssenceCatalogueSettings();
             Tracking = new TrackingPreferences();
         }
 
         [Menu("Enable", "Turns the entire plugin on/off")]
         public ToggleNode Enable { get; set; }
 
-        [Menu("Strategy", 25, CollapsedByDefault = false)]
-        public EssenceCatalogueSettings Catalogue { get; set; }
+        [Menu(null, 25)]
+        [JsonIgnore]
+        public CustomNode CatalogueView { get; set; }
 
         [Menu("Essence Indicators", 50, CollapsedByDefault = false)]
         public IndicatorSettings Indicators { get; set; }
@@ -60,8 +61,13 @@ namespace BetterEssenceCorruptionHelper
         [Menu("Kill-Ready Indicator", 200)]
         public KillReadySettings KillReady { get; set; } = new KillReadySettings();
 
-        [Menu("Show Expected Profit", "Above CORRUPT, show how much a Vaal Orb is expected to add, after its own cost, at current prices")]
+        [Menu("Show Expected Profit", "Above CORRUPT, show how much a Vaal Orb is expected to add, after its own cost, at current prices", 250)]
         public ToggleNode ShowValueRange { get; set; } = new ToggleNode(true);
+
+        /// <summary>Live simulation window showing the essence ground label with current overlay settings.</summary>
+        [Menu(null, 300)]
+        [JsonIgnore]
+        public CustomNode Preview { get; set; } = new CustomNode();
     }
 
     /// <summary>
@@ -174,17 +180,6 @@ namespace BetterEssenceCorruptionHelper
         public ColorNode BorderColor { get; set; } = new ColorNode(new Color(100, 100, 100, 200));
     }
 
-    /// <summary>
-    /// The strategy picker, the Essence catalogue (MEDS first, prices, tracking checkboxes) and the
-    /// price diagnostics. All drawn by CatalogueView; the choices themselves live in
-    /// <see cref="Settings.Tracking"/>.
-    /// </summary>
-    [Submenu(CollapsedByDefault = false)]
-    public class EssenceCatalogueSettings
-    {
-        [JsonIgnore]
-        public CustomNode CatalogueView { get; set; } = new CustomNode();
-    }
 
     [Submenu(CollapsedByDefault = true)]
     public class DebugSettings
@@ -200,6 +195,9 @@ namespace BetterEssenceCorruptionHelper
 
         [Menu("Border Color", "Border color for debug window")]
         public ColorNode DebugBorderColor { get; set; } = new ColorNode(Color.Gray);
+
+        [JsonIgnore]
+        public CustomNode Preview { get; set; } = new CustomNode();
 
         /// <summary>Copy buttons, the item mapping table and the game-files check, drawn by CatalogueView.</summary>
         [JsonIgnore]

@@ -54,62 +54,51 @@ namespace BetterEssenceCorruptionHelper.Strategy
     {
         /// <summary>
         /// Value-driven: per monster, the expected essence value after a Vaal Orb (each outcome the map
-        /// setup allows counted as equally likely - no odds are published, see CorruptionModel) against
-        /// the orb's price. MEDS come out on top whenever corrupted essences are worth it; anything else
-        /// qualifies on its own merits, and it all follows the prices as Ninja Price refreshes.
+        /// setup allows counted as equally likely - see CorruptionModel) against the orb's price.
         /// </summary>
         public static readonly StrategyDefinition Profit = new(
             Id: "profit",
-            DisplayName: "Profit (expected value)",
-            Summary: "Corrupt a monster when a Vaal Orb is expected to add more value than it costs, at current prices.",
+            DisplayName: "Profit (Expected Value)",
+            Summary: "Corrupts when the average outcome beats the Vaal Orb cost at live prices.",
             Mode: StrategyMode.Profit,
             CorruptsByRule: _ => false,
             DefaultMinPackSize: 0,
             ExpectedSetup: new CorruptionSetup(StabilityScarab: false, CrystalResonance: false),
-            Notes:
-            [
-                "Click an essence to always corrupt it, again to never corrupt it, again for automatic.",
-                "The scarab and Crystal Resonance are read from the game.",
-                "Nobody publishes the odds, so every possible outcome counts as equally likely.",
-            ]);
+            Notes: []);
 
         /// <summary>
-        /// Maxroll "Corrupted Essences" (https://maxroll.gg/poe/currency/corrupted-essences, 3.29,
-        /// updated 2026-08-04): Essence Scarab of Stability, no Crystal Resonance; "If you find any of the
-        /// purple Essences (MEDS - Misery, Envy, Dread, Scorn), use a Vaal Orb to Corrupt them". Every
-        /// MEDS tier counts because the Group F result does not depend on tier (poewiki). The 6+ pack
-        /// rule is this plugin's long-standing heuristic, kept as a default.
+        /// Maxroll "Corrupted Essences" (https://maxroll.gg/poe/currency/corrupted-essences, 3.29):
+        /// Essence Scarab of Stability, no Crystal Resonance; corrupt purple MEDS (Misery, Envy, Dread,
+        /// Scorn) for a chance at Group F (Horror, Delirium, Hysteria, Insanity).
         /// </summary>
         public static readonly StrategyDefinition Meds = new(
             Id: "meds",
-            DisplayName: "MEDS corruption",
-            Summary: "Corrupt every monster holding a MEDS essence (Misery, Envy, Dread, Scorn). Kill the rest.",
+            DisplayName: "MEDS Corruption",
+            Summary: "Corrupts purple MEDS for a 50/50 chance at Horror, Delirium, Hysteria, or Insanity.",
             Mode: StrategyMode.FixedSet,
             CorruptsByRule: e => e.IsMeds,
             DefaultMinPackSize: 6,
             ExpectedSetup: new CorruptionSetup(StabilityScarab: true, CrystalResonance: false),
             Notes:
             [
-                "Use the Essence Scarab of Stability.",
-                "Crystal Resonance must not be allocated.",
+                "Run with Essence Scarab of Stability. Do not allocate Crystal Resonance.",
             ]);
 
         /// <summary>
-        /// Maxroll "Deafening Essences" (https://maxroll.gg/poe/currency/deafening-essences, 3.29,
-        /// updated 2026-08-04): Crystal Resonance allocated, which "prevents you from upgrading essences
-        /// into corrupted essences so don't use your Vaal Orbs on them".
+        /// Maxroll "Deafening Essences" (https://maxroll.gg/poe/currency/deafening-essences, 3.29):
+        /// Crystal Resonance allocated, which prevents corrupting into corrupted essences.
         /// </summary>
         public static readonly StrategyDefinition Deafening = new(
             Id: "deafening",
-            DisplayName: "Deafening farming (no corruption)",
-            Summary: "Crystal Resonance boss farming: kill every essence monster, boss last. No Vaal Orbs.",
+            DisplayName: "Deafening Boss Farming",
+            Summary: "Kill essence mobs, then slay map boss to duplicate Deafening essences. No Vaal Orbs.",
             Mode: StrategyMode.NoCorruption,
             CorruptsByRule: _ => false,
             DefaultMinPackSize: 0,
             ExpectedSetup: new CorruptionSetup(StabilityScarab: false, CrystalResonance: true),
             Notes:
             [
-                "Allocate Crystal Resonance.",
+                "Requires Crystal Resonance on Atlas tree. Vaal Orbs are disabled.",
             ]);
 
         public static IReadOnlyList<StrategyDefinition> All { get; } = [Profit, Meds, Deafening];

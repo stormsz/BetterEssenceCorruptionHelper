@@ -141,7 +141,7 @@ public class CorruptionModelTests
         var transform = a.Outcomes.Single(o => o.Outcome == CorruptionOutcome.Transform);
         Assert.Equal(33.14 - 2.03, transform.MinGain, 6);
         Assert.Equal(45.47 - 2.03, transform.MaxGain, 6);
-        Assert.Equal((37.63 + 36.3 + 45.47 + 33.14) / 4 - 2.03, transform.UniformMeanGain!.Value, 6);
+        Assert.Equal((36.3 + 37.63) / 2 - 2.03, transform.UniformMeanGain!.Value, 6);
 
         // Worst case is the upgrade "doing nothing" minus the orb: a small loss.
         Assert.Equal(-Vaal, a.WorstNetGain, 6);
@@ -179,7 +179,8 @@ public class CorruptionModelTests
 
         Assert.Equal(0, add.MinGain);
         Assert.Equal(33.07, add.MaxGain, 6); // Deafening Scorn - Group F can't be added
-        Assert.Null(add.UniformMeanGain);
+        Assert.NotNull(add.UniformMeanGain);
+        Assert.True(add.UniformMeanGain > 0);
         Assert.DoesNotContain("Whispering Essence of Greed", a.UnpricedItems); // not on the monster, not reported
     }
 
@@ -237,19 +238,50 @@ public class CorruptionModelTests
     [Fact]
     public void Expected_gain_counts_each_possible_outcome_as_equally_likely()
     {
-        var transformMean = (37.63 + 36.3 + 45.47 + 33.14) / 4 - 2.03;
+        var transformMean = (36.3 + 37.63) / 2 - 2.03;
 
         // Stability: tier +1 (nothing for Deafening) or transform, half each.
         var stability = Assess(Stability, "Deafening Essence of Misery");
         Assert.Equal(0.5 * 0 + 0.5 * transformMean - Vaal, stability.ExpectedNetGain, 6);
 
-        // No scarab: no change, tier +1, added essence (counted at its 0c lower bound), transform.
+        // No scarab: no change, tier +1, added essence (estimated mean), transform.
         var plain = Assess(Plain, "Deafening Essence of Misery");
-        Assert.Equal(0.25 * transformMean - Vaal, plain.ExpectedNetGain, 6);
+        var addMean = plain.Outcomes.Single(o => o.Outcome == CorruptionOutcome.AddEssence).UniformMeanGain!.Value;
+        Assert.Equal(0.25 * 0 + 0.25 * addMean + 0.25 * transformMean - Vaal, plain.ExpectedNetGain, 6);
 
         // Crystal Resonance: copying an existing essence is worth nothing on average.
         var resonance = Assess(Resonance, "Deafening Essence of Scorn", "Deafening Essence of Dread");
         Assert.Equal(-Vaal, resonance.ExpectedNetGain, 6);
+    }
+
+    [Fact]
+    public void Outlier_price_in_candidate_group_does_not_distort_transform_or_add_expected_values()
+    {
+        // Setup where Shrieking Spite has an extreme troll listing of 95c, while Deafening Spite is 9.61c.
+        // Group C essence (Suffering) transforms into Group D (Loathing 1c, Zeal 1.25c, Anguish 1c, Spite 95c).
+        // Median and tier-capping should prevent Suffering from showing positive expected net gain.
+        var customPrices = new Dictionary<string, double>(Prices)
+        {
+            ["Shrieking Essence of Suffering"] = 1.0,
+            ["Deafening Essence of Suffering"] = 1.09,
+            ["Shrieking Essence of Loathing"] = 1.0,
+            ["Shrieking Essence of Zeal"] = 1.25,
+            ["Shrieking Essence of Anguish"] = 1.0,
+            ["Shrieking Essence of Spite"] = 95.0,
+            ["Deafening Essence of Spite"] = 9.61,
+        };
+
+        var a = CorruptionModel.Assess(
+            [E("Shrieking Essence of Suffering")],
+            0,
+            Plain,
+            e => customPrices.TryGetValue(e.Name, out var p) ? p : 1.0,
+            0.61,
+            out _)!;
+
+        // With arithmetic mean without capping, EV was +7.38c.
+        // With robust median and tier capping, EV must not be high profit (in fact negative after Vaal orb).
+        Assert.True(a.ExpectedNetGain < 0.5, $"Expected EV to be &lt; 0.5c, but got {a.ExpectedNetGain}");
     }
 
     [Fact]
@@ -352,6 +384,44 @@ public class CorruptionLogTests
         Assert.Equal(1, log.Unclassified);
         Assert.Equal(2, log.RealizedGainCount);
         Assert.Equal((37.6 - 2.0 - 0.4) + (-0.4), log.RealizedGainSum, 9);
+    }
+
+    [Fact]
+    public void Tracks_session_kills_mistakes_and_missed()
+    {
+        var log = new CorruptionLog();
+        log.RecordKill();
+        log.RecordKill();
+        log.RecordMissed();
+
+        // 1 recommended corruption, 1 mistaken corruption
+        var good = new CorruptionRecord(
+            DateTime.UtcNow, "Map", ["Misery"], ["Horror"],
+            CorruptionOutcome.Transform, false, "meds", new CorruptionSetup(false, false),
+            true, 10.0, 30.0, 0.3, 0);
+
+        var bad = new CorruptionRecord(
+            DateTime.UtcNow, "Map", ["Greed"], ["Greed"],
+            CorruptionOutcome.NoChange, false, "meds", new CorruptionSetup(false, false),
+            false, 1.0, 1.0, 0.3, 0);
+
+        log.Record(good, null);
+        log.Record(bad, null);
+
+        Assert.Equal(2, log.TotalKilled);
+        Assert.Equal(2, log.Total);
+        Assert.Equal(1, log.RecommendedCorruptions);
+        Assert.Equal(1, log.MistakenCorruptions);
+        Assert.Equal(1, log.TotalMissed);
+        Assert.Equal(2, log.TotalMistakes); // 1 mistaken corruption + 1 missed corruption
+
+        log.ResetSession();
+        Assert.Equal(0, log.TotalKilled);
+        Assert.Equal(0, log.Total);
+        Assert.Equal(0, log.RecommendedCorruptions);
+        Assert.Equal(0, log.MistakenCorruptions);
+        Assert.Equal(0, log.TotalMissed);
+        Assert.Equal(0, log.TotalMistakes);
     }
 
     [Fact]

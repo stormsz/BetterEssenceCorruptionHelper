@@ -26,6 +26,8 @@ namespace BetterEssenceCorruptionHelper
         private SetupDetector? _setup;
         private Action? _catalogueDraw;
         private Action? _diagnosticsDraw;
+        private Action? _indicatorPreviewDraw;
+        private Action? _debugPreviewDraw;
 
         /// <summary>Hash of the map instance the current stats belong to (0 = none yet)</summary>
         private uint _statsMapHash;
@@ -49,21 +51,27 @@ namespace BetterEssenceCorruptionHelper
             if (Settings.Tracking.Normalize() is { } note)
                 DebugWindow.LogMsg($"[{Name}] settings repaired: {note}", 5, SharpDX.Color.Yellow);
 
-            _priceBridge = new NinjaPriceBridge(GameController);
-            _prices = new PriceBook(EssenceCatalogue.MarketItems, _priceBridge.Resolve, () => _clock.ElapsedMilliseconds);
+            _priceBridge = new NinjaPriceBridge(GameController, () => PluginManager);
+            _prices = new PriceBook(EssenceCatalogue.MarketItems, _priceBridge.Resolve, () => _clock.ElapsedMilliseconds, _priceBridge.GetStatus);
             _values = new EssenceValues(_prices);
             _setup = new SetupDetector(GameController);
 
-            _entityTracker = new EssenceEntityTracker(GameController, Settings, _mapStats, _corruptionLog, _prices, _values, _setup, OutcomeCsvPath);
-            _renderer = new EssenceRenderer(GameController, Settings, _mapStats, _entityTracker, _prices, _values, _setup, _corruptionLog);
-
             var icons = new EssenceIcons(Graphics, Path.Join(ConfigDirectory, "icons"));
+            _entityTracker = new EssenceEntityTracker(GameController, Settings, _mapStats, _corruptionLog, _prices, _values, _setup, OutcomeCsvPath);
+            _renderer = new EssenceRenderer(GameController, Settings, _mapStats, _entityTracker, _prices, _values, _setup, _corruptionLog, icons);
+
             var catalogueView = new CatalogueView(Settings, _prices, _values, _setup, _priceBridge, _entityTracker, _corruptionLog, icons,
                 () => _clock.ElapsedMilliseconds);
+            var indicatorPreview = new IndicatorPreview(Settings, icons);
+            var debugPreview = new DebugPreview(Settings, icons);
             _catalogueDraw = catalogueView.Draw;
             _diagnosticsDraw = catalogueView.DrawDiagnostics;
-            Settings.Catalogue.CatalogueView.DrawDelegate = _catalogueDraw;
+            _indicatorPreviewDraw = indicatorPreview.Draw;
+            _debugPreviewDraw = debugPreview.Draw;
+            Settings.CatalogueView.DrawDelegate = _catalogueDraw;
             Settings.Debug.Diagnostics.DrawDelegate = _diagnosticsDraw;
+            Settings.Indicators.Preview.DrawDelegate = _indicatorPreviewDraw;
+            Settings.Debug.Preview.DrawDelegate = _debugPreviewDraw;
 
             // No coroutines: all work runs in Tick on the main thread (see EssenceEntityTracker for the
             // update path). ExileCore memory objects and ground-label Elements are backed by per-frame
@@ -86,8 +94,10 @@ namespace BetterEssenceCorruptionHelper
                     node.DrawDelegate = () => { };
             }
 
-            Blank(Settings.Catalogue.CatalogueView, _catalogueDraw);
+            Blank(Settings.CatalogueView, _catalogueDraw);
             Blank(Settings.Debug.Diagnostics, _diagnosticsDraw);
+            Blank(Settings.Indicators.Preview, _indicatorPreviewDraw);
+            Blank(Settings.Debug.Preview, _debugPreviewDraw);
             base.OnPluginDestroyForHotReload();
         }
 

@@ -1,9 +1,18 @@
-﻿using ExileCore.PoEMemory.Elements;
+using ExileCore.PoEMemory.Elements;
 using ExileCore.PoEMemory.MemoryObjects;
 using Vector2 = System.Numerics.Vector2;
 
 namespace BetterEssenceCorruptionHelper.Models
 {
+    /// <summary>
+    /// Pending corruption outcome staged when corrupted, committed only when the monster is killed.
+    /// </summary>
+    internal sealed record PendingCorruptionOutcome(
+        EssenceAnalysis Before,
+        EssenceAnalysis After,
+        bool WasRecommended,
+        EssenceState OldState);
+
     /// <summary>
     /// Tracking data for a single essence entity.
     /// Keyed by the game's entity ID, which (unlike the memory address) stays the same when an
@@ -31,6 +40,12 @@ namespace BetterEssenceCorruptionHelper.Models
 
         /// <summary>Analysis before corruption (for comparison)</summary>
         public EssenceAnalysis? PreviousAnalysis { get; set; }
+
+        /// <summary>Pending corruption outcome, committed only when the released monster dies.</summary>
+        public PendingCorruptionOutcome? PendingCorruption { get; set; }
+
+        /// <summary>Pending missed corruption, committed only when the released monster dies.</summary>
+        public bool PendingMissed { get; set; }
 
         /// <summary>Bumped whenever <see cref="Analysis"/> changes content, so cached derived values refresh</summary>
         public int AnalysisVersion { get; set; }

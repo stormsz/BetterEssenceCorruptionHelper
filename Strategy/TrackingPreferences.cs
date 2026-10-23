@@ -56,7 +56,7 @@ namespace BetterEssenceCorruptionHelper.Strategy
 
         internal int EffectiveMinPackSize => MinPackSize ?? Strategy.DefaultMinPackSize;
 
-        internal double EffectiveMinExpectedProfit => MinExpectedProfit ?? DefaultMinExpectedProfit;
+        internal double EffectiveMinExpectedProfit => Math.Max(DefaultMinExpectedProfit, MinExpectedProfit ?? DefaultMinExpectedProfit);
 
         /// <summary>Group F only exists on monsters that are already corrupted, so it can't be chosen.</summary>
         internal static bool CanChoose(EssenceEntry entry) => !entry.IsCorruptionOnly;
@@ -126,7 +126,7 @@ namespace BetterEssenceCorruptionHelper.Strategy
             if (MinPackSize is < 0)
                 MinPackSize = 0;
 
-            if (MinExpectedProfit is { } profit && !float.IsFinite(profit))
+            if (MinExpectedProfit is { } profit && (!float.IsFinite(profit) || profit < DefaultMinExpectedProfit))
                 MinExpectedProfit = null;
 
             // Schema 1 is the first persisted layout; later versions migrate from here.
