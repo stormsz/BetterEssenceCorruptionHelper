@@ -140,7 +140,7 @@ namespace BetterEssenceCorruptionHelper.Models
         public static string ToCsvLine(CorruptionRecord r)
         {
             static string Num(double? v) => v?.ToString("0.###", CultureInfo.InvariantCulture) ?? "";
-            static string Text(string s) => s.Contains(',') || s.Contains('"') ? $"\"{s.Replace("\"", "\"\"")}\"" : s;
+            static string Text(string s) => s.AsSpan().IndexOfAny(",\"\r\n") >= 0 ? $"\"{s.Replace("\"", "\"\"")}\"" : s;
 
             return string.Join(",",
                 r.At.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture),

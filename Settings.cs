@@ -26,7 +26,7 @@ namespace BetterEssenceCorruptionHelper
         [JsonIgnore]
         public CustomNode CatalogueView { get; set; }
 
-        [Menu("Essence Indicators", 50, CollapsedByDefault = false)]
+        [Menu("Essence Indicators", 50, CollapsedByDefault = true)]
         public IndicatorSettings Indicators { get; set; }
 
         [Menu("Essence Map Stats", 100, CollapsedByDefault = false)]
@@ -43,7 +43,7 @@ namespace BetterEssenceCorruptionHelper
         public DebugSettings Debug { get; set; }
     }
 
-    [Submenu(CollapsedByDefault = false)]
+    [Submenu(CollapsedByDefault = true)]
     public class IndicatorSettings
     {
         [Menu("Enable All Indicators", "Master toggle for all essence indicators")]

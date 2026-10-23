@@ -20,7 +20,6 @@ namespace BetterEssenceCorruptionHelper.UI
         private readonly EssenceIcons _icons = icons;
         private int _scenario; // 0 = Corrupt Target, 1 = Kill Ready
 
-        private static readonly string[] ScenarioNames = ["Corrupt Target", "Kill Ready"];
         private static readonly List<List<(string text, Color color)>> CorruptDebugLines = GetCorruptDebugLines();
         private static readonly List<List<(string text, Color color)>> KillDebugLines = GetKillDebugLines();
 
@@ -33,8 +32,9 @@ namespace BetterEssenceCorruptionHelper.UI
             ImGui.AlignTextToFramePadding();
             ImGui.TextDisabled("LIVE DEBUG OVERLAY PREVIEW");
             ImGui.SameLine(0, 16);
-            ImGui.SetNextItemWidth(140);
-            ImGui.Combo("##debugPreviewScenario", ref _scenario, ScenarioNames, ScenarioNames.Length);
+            ImGui.RadioButton("Corrupt Target##debugPreview", ref _scenario, 0);
+            ImGui.SameLine();
+            ImGui.RadioButton("Kill Ready##debugPreview", ref _scenario, 1);
 
             if (!_settings.Debug.ShowDebugInfo.Value)
             {

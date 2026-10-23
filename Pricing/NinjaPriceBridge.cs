@@ -94,8 +94,6 @@ namespace BetterEssenceCorruptionHelper.Pricing
         /// <summary>Stand-in definitions for items the game files can't (yet) provide.</summary>
         private readonly Dictionary<MarketItem, BaseItemType> _standIns = new();
 
-        public int ResolveCount { get; private set; }
-
         public ItemMapping GetMapping(MarketItem item) =>
             _mappings.TryGetValue(item, out var mapping) ? mapping : new ItemMapping(ItemMappingStatus.Pending, null, null);
 
@@ -262,8 +260,6 @@ namespace BetterEssenceCorruptionHelper.Pricing
         /// </summary>
         public PriceQuery? Resolve()
         {
-            ResolveCount++;
-
             var status = GetStatus();
             if (status.PluginState is NinjaPluginState.Disabled or NinjaPluginState.FailedCompilation or NinjaPluginState.NotInstalled)
                 return null;

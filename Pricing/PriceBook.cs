@@ -123,8 +123,6 @@ namespace BetterEssenceCorruptionHelper.Pricing
             }
         }
 
-        public IReadOnlyList<MarketItem> Items => _items;
-
         /// <summary>Incremented on every sample, so cached derived values know when to recompute.</summary>
         public int Version { get; private set; }
 
@@ -153,7 +151,6 @@ namespace BetterEssenceCorruptionHelper.Pricing
 
         public int ListedCount { get; private set; }
         public int UnlistedCount { get; private set; }
-        public int FailedCount { get; private set; }
 
         public PriceInfo Get(MarketItem item) =>
             _indexByItem.TryGetValue(item, out var i) ? _prices[i] : PriceInfo.NotSampled;
@@ -192,7 +189,7 @@ namespace BetterEssenceCorruptionHelper.Pricing
             _query ??= _resolveProvider();
             var query = _query;
 
-            int listed = 0, unlisted = 0, failed = 0;
+            int listed = 0, unlisted = 0, failed = 0, threw = 0;
             var essenceListed = false;
             var anyPositive = false;
 
@@ -202,15 +199,7 @@ namespace BetterEssenceCorruptionHelper.Pricing
                     _prices[i] = Degrade(_prices[i], PriceState.ProviderUnavailable, now);
 
                 failed = _prices.Length;
-                var detailed = QueryDetailedStatus();
-                LastDetailedStatus = detailed;
-                Status = detailed.PluginState switch
-                {
-                    NinjaPluginState.Disabled => ProviderStatus.Disabled,
-                    NinjaPluginState.NotInstalled => ProviderStatus.NotInstalled,
-                    NinjaPluginState.FailedCompilation => ProviderStatus.FailedCompilation,
-                    _ => ProviderStatus.Unavailable,
-                };
+                Status = ProviderUnavailableStatus();
             }
             else
             {
@@ -228,6 +217,7 @@ namespace BetterEssenceCorruptionHelper.Pricing
                     {
                         _prices[i] = Degrade(_prices[i], PriceState.Error, now);
                         failed++;
+                        threw++;
                         continue;
                     }
 
@@ -266,28 +256,32 @@ namespace BetterEssenceCorruptionHelper.Pricing
                     : ProviderStatus.Ready;
 
                 // Every call threw: the delegate is probably dead (provider unloaded). Look it up again.
-                if (failed == _items.Count && listed == 0 && zeroes.Count == 0)
+                if (threw == _items.Count)
                 {
                     _query = null;
-                    var detailed = _statusProvider?.Invoke() ?? default;
-                    LastDetailedStatus = detailed;
-                    Status = detailed.PluginState switch
-                    {
-                        NinjaPluginState.Disabled => ProviderStatus.Disabled,
-                        NinjaPluginState.NotInstalled => ProviderStatus.NotInstalled,
-                        NinjaPluginState.FailedCompilation => ProviderStatus.FailedCompilation,
-                        _ => ProviderStatus.Unavailable,
-                    };
+                    Status = ProviderUnavailableStatus();
                 }
             }
 
             ListedCount = listed;
             UnlistedCount = unlisted;
-            FailedCount = failed;
             LastSampleMs = now;
             _nextSampleMs = now + (Status == ProviderStatus.Ready ? RefreshIntervalMs : RetryIntervalMs);
             LastSampleDurationTicks = System.Diagnostics.Stopwatch.GetTimestamp() - started;
             Version++;
+        }
+
+        /// <summary>Why there is no provider to query, from Ninja Price's detailed status (also kept for diagnostics).</summary>
+        private ProviderStatus ProviderUnavailableStatus()
+        {
+            LastDetailedStatus = QueryDetailedStatus();
+            return LastDetailedStatus.PluginState switch
+            {
+                NinjaPluginState.Disabled => ProviderStatus.Disabled,
+                NinjaPluginState.NotInstalled => ProviderStatus.NotInstalled,
+                NinjaPluginState.FailedCompilation => ProviderStatus.FailedCompilation,
+                _ => ProviderStatus.Unavailable,
+            };
         }
 
         /// <summary>

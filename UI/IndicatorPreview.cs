@@ -16,9 +16,7 @@ namespace BetterEssenceCorruptionHelper.UI
     {
         private readonly Settings _settings = settings;
         private readonly EssenceIcons _icons = icons;
-        private int _previewMode = 2; // 0 = Corrupt-Me, 1 = Kill-Ready, 2 = Side-by-Side
-
-        private static readonly string[] ModeNames = ["Corrupt-Me", "Kill-Ready", "Side-by-Side"];
+        private int _previewMode = 2; // 0 = Corrupt-Me, 1 = Kill-Ready, 2 = Side-by-Side (default)
 
         public void Draw()
         {
@@ -29,8 +27,11 @@ namespace BetterEssenceCorruptionHelper.UI
             ImGui.AlignTextToFramePadding();
             ImGui.TextDisabled("LIVE OVERLAY PREVIEW");
             ImGui.SameLine(0, 16);
-            ImGui.SetNextItemWidth(140);
-            ImGui.Combo("##indicatorPreviewMode", ref _previewMode, ModeNames, ModeNames.Length);
+            ImGui.RadioButton("Side-by-Side##indicatorPreview", ref _previewMode, 2);
+            ImGui.SameLine();
+            ImGui.RadioButton("Corrupt-Me##indicatorPreview", ref _previewMode, 0);
+            ImGui.SameLine();
+            ImGui.RadioButton("Kill-Ready##indicatorPreview", ref _previewMode, 1);
 
             if (!_settings.Indicators.EnableAllIndicators.Value)
             {

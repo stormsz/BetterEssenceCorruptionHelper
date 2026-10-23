@@ -93,7 +93,8 @@ namespace BetterEssenceCorruptionHelper.UI
         private readonly Dictionary<EssenceEntry, CorruptionAssessment?> _singleProfit = new();
         private (int, int, int) _profitKey = (-1, -1, -1);
 
-        private List<(string Metadata, string BaseName)>? _uncatalogued;
+        /// <summary>Result of the last "check game files" click: "" when nothing is new, null before the first check.</summary>
+        private string? _uncatalogued;
         private string? _copyNote;
 
         private TrackingPreferences Preferences => _settings.Tracking;
@@ -200,28 +201,30 @@ namespace BetterEssenceCorruptionHelper.UI
             DrawLegend();
         }
 
+        private const string MedsFallback = "Until then, only monsters holding a MEDS essence get a Vaal Orb.";
+        private static readonly SetupStatus.Status NinjaDisabled = new(SetupStatus.Level.Problem,
+            "Ninja Price is disabled in ExileApi", "Enable the 'Ninja Price' plugin in ExileApi's Plugins menu. " + MedsFallback);
+        private static readonly SetupStatus.Status NinjaNotInstalled = new(SetupStatus.Level.Problem,
+            "Ninja Price plugin is not installed", "Install the Ninja Price (Get-Chaos-Value) plugin. " + MedsFallback);
+        private static readonly SetupStatus.Status NinjaFailedCompilation = new(SetupStatus.Level.Problem,
+            "Ninja Price failed to compile", "Check ExileCore compilation logs for Ninja Price errors. " + MedsFallback);
+        private static readonly SetupStatus.Status NinjaUnavailable = new(SetupStatus.Level.Problem,
+            "Profit needs the Ninja Price plugin", "Install and enable Ninja Price. " + MedsFallback);
+        private static readonly SetupStatus.Status NinjaNoEssences = new(SetupStatus.Level.Problem,
+            "Ninja Price has no essence prices", "Turn on Essence valuation in Ninja Price's settings. Until then, only MEDS get a Vaal Orb.");
+        private static readonly SetupStatus.Status NinjaLoading = new(SetupStatus.Level.Warning,
+            "Waiting for Ninja Price", "It's still loading prices. " + MedsFallback);
+
         /// <summary>Why the Profit strategy can't price anything right now, or null when Ninja Price is ready.</summary>
         private SetupStatus.Status? NinjaPriceProblem() => _prices.Status switch
         {
             ProviderStatus.Ready => null,
-            ProviderStatus.Disabled => new SetupStatus.Status(SetupStatus.Level.Problem,
-                "Ninja Price is disabled in ExileApi",
-                "Enable the 'Ninja Price' plugin in ExileApi's Plugins menu. Until then, only monsters holding a MEDS essence get a Vaal Orb."),
-            ProviderStatus.NotInstalled => new SetupStatus.Status(SetupStatus.Level.Problem,
-                "Ninja Price plugin is not installed",
-                "Install the Ninja Price (Get-Chaos-Value) plugin. Until then, only monsters holding a MEDS essence get a Vaal Orb."),
-            ProviderStatus.FailedCompilation => new SetupStatus.Status(SetupStatus.Level.Problem,
-                "Ninja Price failed to compile",
-                "Check ExileCore compilation logs for Ninja Price errors. Until then, only monsters holding a MEDS essence get a Vaal Orb."),
-            ProviderStatus.Unavailable => new SetupStatus.Status(SetupStatus.Level.Problem,
-                "Profit needs the Ninja Price plugin",
-                "Install and enable Ninja Price. Until then, only monsters holding a MEDS essence get a Vaal Orb."),
-            ProviderStatus.EssenceDataMissing => new SetupStatus.Status(SetupStatus.Level.Problem,
-                "Ninja Price has no essence prices",
-                "Turn on Essence valuation in Ninja Price's settings. Until then, only MEDS get a Vaal Orb."),
-            _ => new SetupStatus.Status(SetupStatus.Level.Warning,
-                "Waiting for Ninja Price",
-                "It's still loading prices. Until then, only monsters holding a MEDS essence get a Vaal Orb."),
+            ProviderStatus.Disabled => NinjaDisabled,
+            ProviderStatus.NotInstalled => NinjaNotInstalled,
+            ProviderStatus.FailedCompilation => NinjaFailedCompilation,
+            ProviderStatus.Unavailable => NinjaUnavailable,
+            ProviderStatus.EssenceDataMissing => NinjaNoEssences,
+            _ => NinjaLoading,
         };
 
         /// <summary>A coloured box: a direct instruction and one short sentence of why.</summary>
@@ -312,8 +315,6 @@ namespace BetterEssenceCorruptionHelper.UI
         {
             var preferences = Preferences;
             var mode = preferences.Strategy.Mode;
-            var entries = EssenceCatalogue.OfType(type).ToList();
-
             ImGui.TableNextRow();
             if (band)
                 ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32(BandRow));
@@ -327,15 +328,18 @@ namespace BetterEssenceCorruptionHelper.UI
             }
 
             ImGui.PushStyleColor(ImGuiCol.Text, GroupColor(group));
-            var clicked = ImGui.Selectable($"{type}##type{type}");
+            var clicked = ImGui.Selectable(type); // type names are unique, so they are the ID too
             ImGui.PopStyleColor();
 
             if (mode == StrategyMode.Profit && group != EssenceGroup.F)
             {
                 if (clicked)
-                    CycleType(entries);
+                    CycleType(EssenceCatalogue.OfType(type).ToList());
                 if (ImGui.IsItemClicked(ImGuiMouseButton.Right))
-                    entries.ForEach(e => preferences.SetChoice(e, EssenceChoice.Auto));
+                {
+                    foreach (var e in EssenceCatalogue.OfType(type))
+                        preferences.SetChoice(e, EssenceChoice.Auto);
+                }
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip($"Click: every {type} tier to always, then never, then automatic. Right-click: automatic.");
             }
@@ -771,6 +775,12 @@ namespace BetterEssenceCorruptionHelper.UI
                 _copyNote = "session stats reset";
             }
 
+            if (_copyNote != null)
+            {
+                ImGui.SameLine();
+                ImGui.TextDisabled(_copyNote);
+            }
+
             ImGui.Spacing();
             ImGui.Spacing();
             DrawMappingTable();
@@ -779,19 +789,19 @@ namespace BetterEssenceCorruptionHelper.UI
 
             if (ImGui.Button("Check game files for new essences"))
             {
-                _uncatalogued = _bridge.FindUncataloguedEssences()
+                _uncatalogued = string.Join(", ", _bridge.FindUncataloguedEssences()
                     .Where(u => !EssenceCatalogue.KnownExclusions.ContainsKey(u.Metadata))
-                    .ToList();
+                    .Select(u => $"{u.BaseName} ({u.Metadata})"));
             }
 
             if (_uncatalogued == null)
                 return;
 
             ImGui.SameLine();
-            if (_uncatalogued.Count == 0)
+            if (_uncatalogued.Length == 0)
                 ImGui.TextColored(GoodColor, "Nothing new.");
             else
-                ImGui.TextColored(WarnColor, $"Not in the catalogue: {string.Join(", ", _uncatalogued.Select(u => $"{u.BaseName} ({u.Metadata})"))}");
+                ImGui.TextColored(WarnColor, "Not in the catalogue: " + _uncatalogued);
         }
 
         private void Copy(string text, string what)
@@ -800,8 +810,9 @@ namespace BetterEssenceCorruptionHelper.UI
             _copyNote = $"copied {what}";
         }
 
-        private IEnumerable<(EssenceEntry? Entry, MarketItem Item)> MappingItems() =>
-            new[] { ((EssenceEntry?)null, EssenceCatalogue.VaalOrb) }.Concat(EssenceCatalogue.All.Select(e => ((EssenceEntry?)e, e.Item)));
+        /// <summary>The Vaal Orb and every essence, as listed in the mapping table (built once; the catalogue is static).</summary>
+        private static readonly (EssenceEntry? Entry, MarketItem Item)[] MappingItems =
+            new[] { ((EssenceEntry?)null, EssenceCatalogue.VaalOrb) }.Concat(EssenceCatalogue.All.Select(e => ((EssenceEntry?)e, e.Item))).ToArray();
 
         private void DrawMappingTable()
         {
@@ -817,7 +828,7 @@ namespace BetterEssenceCorruptionHelper.UI
             ImGui.TableSetupColumn("Value used");
             ImGui.TableHeadersRow();
 
-            foreach (var (entry, item) in MappingItems())
+            foreach (var (entry, item) in MappingItems)
             {
                 var mapping = _bridge.GetMapping(item);
 
@@ -836,25 +847,10 @@ namespace BetterEssenceCorruptionHelper.UI
             ImGui.EndTable();
         }
 
-        private string BuildPricesTsv()
-        {
-            var sb = new StringBuilder("name\tgroup\ttier\tpoe_ninja_chaos\tvalue_chaos\tvalue_source\tchoice\n");
-            foreach (var entry in EssenceCatalogue.All)
-            {
-                var value = _values.Get(entry);
-                sb.Append(entry.Name).Append('\t').Append(entry.Group).Append('\t').Append(entry.TierName).Append('\t')
-                    .Append(Num(value.MarketChaos)).Append('\t').Append(Num(value.Chaos)).Append('\t')
-                    .Append(value.Source).Append('\t').Append(Preferences.Choice(entry)).Append('\n');
-            }
-
-            sb.Append("Vaal Orb\t\t\t").Append(Num(_prices.VaalOrb.Value)).Append('\t').Append(Num(_prices.VaalOrb.Value)).Append("\tMarket\t\n");
-            return sb.ToString();
-        }
-
         private string BuildMappingTsv()
         {
             var sb = new StringBuilder("name\ttier\tgame_basename\tgame_class\tmetadata\tmapping\tmarket_feed\tmarket_key\tprice_state\tchaos_per_item\n");
-            foreach (var (entry, item) in MappingItems())
+            foreach (var (entry, item) in MappingItems)
             {
                 var mapping = _bridge.GetMapping(item);
                 var price = _prices.Get(item);
@@ -895,7 +891,7 @@ namespace BetterEssenceCorruptionHelper.UI
             sb.Append("session_recommended_corruptions\t").Append(_corruptionLog.RecommendedCorruptions).Append('\n');
             sb.Append("session_mistaken_corruptions\t").Append(_corruptionLog.MistakenCorruptions).Append('\n');
             sb.Append("session_missed_corruptions\t").Append(_corruptionLog.TotalMissed).Append('\n');
-            sb.Append("session_realized_gain_chaos\t").Append(_corruptionLog.RealizedGainSum).Append('\n');
+            sb.Append("session_realized_gain_chaos\t").Append(_corruptionLog.RealizedGainSum.ToString(CultureInfo.InvariantCulture)).Append('\n');
             return sb.ToString();
         }
 
@@ -911,13 +907,15 @@ namespace BetterEssenceCorruptionHelper.UI
         {
             var perf = _tracker.Performance;
             var last = perf.Last;
-            return string.Join("\n",
-                $"Tracker, last second: {last.Ticks} ticks, {last.AvgTickMicros:0} us avg, {last.MaxTickMicros:0} us max per tick",
+            var sampleMs = _prices.LastSampleDurationTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+
+            // Invariant culture, like the other copied diagnostics: a pasted report reads the same on any locale.
+            return string.Create(CultureInfo.InvariantCulture,
+                $"Tracker, last second: {last.Ticks} ticks, {last.AvgTickMicros:0} us avg, {last.MaxTickMicros:0} us max per tick\n" +
                 $"Entities visited: {last.EntityVisits}/s ({last.MonolithChecks} monolith, {last.MonsterVisits} monster, {last.SeedVisits} reseed), " +
-                $"entity list size {perf.EntityListSize}",
-                $"Label list scans: {last.LabelScans}/s ({last.LabelsVisited} labels read), label analyses: {last.Analyses}/s",
-                $"Monoliths loaded: {last.CandidateMonoliths}, essences tracked: {last.Tracked}. " +
-                $"Price sample: {_prices.LastSampleDurationTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:0.00} ms") + "\n";
+                $"entity list size {perf.EntityListSize}\n" +
+                $"Label list scans: {last.LabelScans}/s ({last.LabelsVisited} labels read), label analyses: {last.Analyses}/s\n" +
+                $"Monoliths loaded: {last.CandidateMonoliths}, essences tracked: {last.Tracked}. Price sample: {sampleMs:0.00} ms\n");
         }
 
         private static string Num(double? value) => value?.ToString("0.####", CultureInfo.InvariantCulture) ?? "";

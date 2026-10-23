@@ -13,7 +13,12 @@ namespace BetterEssenceCorruptionHelper.UI
         public static string Chaos(double value) => Number(value) + "c";
 
         /// <summary>"+12.5c" / "-0.4c".</summary>
-        public static string SignedChaos(double value) => (value >= 0 ? "+" : "-") + Number(System.Math.Abs(value)) + "c";
+        public static string SignedChaos(double value)
+        {
+            // Sign of what is printed: -0.001 rounds to "0" and shows as "+0c", not "-0c".
+            var number = Number(System.Math.Abs(value));
+            return (value < 0 && number != "0" ? "-" : "+") + number + "c";
+        }
 
         private static string Number(double value)
         {
@@ -43,15 +48,6 @@ namespace BetterEssenceCorruptionHelper.UI
             { Chaos: not { } } => "-",
             { IsApproximate: true } => "-",
             _ => Chaos(value.Chaos.Value),
-        };
-
-        /// <summary>Where a value comes from, in a sentence.</summary>
-        public static string ValueExplanation(EssenceValue value) => value.Source switch
-        {
-            ValueSource.Market => "Ninja Price.",
-            ValueSource.Capped => $"Ninja Price ({Chaos(value.MarketChaos!.Value)}) capped at {Chaos(value.Chaos!.Value)} ({value.Basis!.TierName} tier).",
-            ValueSource.Cheap => $"Ninja Price has no price for it, so it counts as {Chaos(EssenceValues.CheapValue)}.",
-            _ => "No price.",
         };
 
         public static string Age(long ms) =>
