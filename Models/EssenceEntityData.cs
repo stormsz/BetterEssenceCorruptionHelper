@@ -76,7 +76,7 @@ namespace BetterEssenceCorruptionHelper.Models
         /// <summary>Bumped whenever <see cref="Analysis"/> changes content, so cached derived values refresh</summary>
         public int AnalysisVersion { get; set; }
 
-        /// <summary>Label line count when last analysed - a change triggers an immediate re-analysis</summary>
+        /// <summary>Label structure (child counts, see EssenceLabelAnalyzer.ReadContentSignature) when last read - a change triggers an immediate re-read</summary>
         public long LabelSignature { get; set; } = -1;
 
         /// <summary>Tracker clock (ms) at which the label is re-read even if its line count didn't change</summary>
@@ -163,8 +163,8 @@ namespace BetterEssenceCorruptionHelper.Models
         /// </summary>
         public string? MonsterEssenceMods { get; set; }
 
-        /// <summary>Tracker clock (ms) of the last identity read of the trapped monster (mods change on corruption)</summary>
-        public long MonsterIdentityReadMs { get; set; } = long.MinValue;
+        /// <summary>Tracker clock (ms) at which the trapped monster's identity is read again (its mods change on corruption)</summary>
+        public long NextIdentityReadMs { get; set; }
 
         /// <summary>Rarity rank of the linked monster when linked (White 0 .. Unique 3, -1 unknown), to compare candidates</summary>
         public int MonsterRarityRank { get; set; } = -1;

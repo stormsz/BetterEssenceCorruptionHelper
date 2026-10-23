@@ -1,4 +1,5 @@
 using BetterEssenceCorruptionHelper.Catalogue;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -56,8 +57,24 @@ namespace BetterEssenceCorruptionHelper.Models
                 UnrecognizedEssenceLines.Count != other.UnrecognizedEssenceLines.Count)
                 return false;
 
-            return Essences.OrderBy(e => e.Name).SequenceEqual(other.Essences.OrderBy(e => e.Name)) &&
-                   UnrecognizedEssenceLines.OrderBy(l => l).SequenceEqual(other.UnrecognizedEssenceLines.OrderBy(l => l));
+            // Re-reads of the same label come back in the same order: compare in place first, and only
+            // sort (allocating) when the order differs.
+            return (SameInOrder(Essences, other.Essences) ||
+                    Essences.OrderBy(e => e.Name, StringComparer.Ordinal).SequenceEqual(other.Essences.OrderBy(e => e.Name, StringComparer.Ordinal))) &&
+                   (SameInOrder(UnrecognizedEssenceLines, other.UnrecognizedEssenceLines) ||
+                    UnrecognizedEssenceLines.OrderBy(l => l, StringComparer.Ordinal).SequenceEqual(other.UnrecognizedEssenceLines.OrderBy(l => l, StringComparer.Ordinal)));
+        }
+
+        private static bool SameInOrder<T>(IReadOnlyList<T> a, IReadOnlyList<T> b)
+        {
+            var comparer = EqualityComparer<T>.Default;
+            for (var i = 0; i < a.Count; i++)
+            {
+                if (!comparer.Equals(a[i], b[i]))
+                    return false;
+            }
+
+            return true;
         }
     }
 }

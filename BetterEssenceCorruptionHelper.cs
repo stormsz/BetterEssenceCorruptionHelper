@@ -30,7 +30,7 @@ namespace BetterEssenceCorruptionHelper
 
         /// <summary>This frame's gates, evaluated once in Tick and reused by Render.</summary>
         private (bool Track, bool Render) _gates;
-        private long _gatesAtMs = long.MinValue;
+        private long _gatesAtMs = -1000;
 
         #endregion
 

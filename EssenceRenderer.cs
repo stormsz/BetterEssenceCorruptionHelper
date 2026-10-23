@@ -146,20 +146,20 @@ namespace BetterEssenceCorruptionHelper
         /// </summary>
         private static RectangleF GetContentRect(Element root)
         {
-            var children = root.Children;
-            if (children == null || children.Count == 0)
-                return root.GetClientRectCache;
-
+            // Drawn every frame: read the two children by index rather than building the child list.
             // Child 0 is the card background, Child 1 is the text container.
             // Any further children (index >= 2) are interaction buttons (such as the Remnant of
             // Corruption button below the card) which must not expand the card boundary.
-            var count = Math.Min(children.Count, 2);
+            var count = (int)Math.Min(root.ChildCount, 2);
+            if (count == 0)
+                return root.GetClientRectCache;
+
             var found = false;
             float left = 0, top = 0, right = 0, bottom = 0;
 
             for (var i = 0; i < count; i++)
             {
-                var child = children[i];
+                var child = root.GetChildAtIndex(i);
                 if (child == null)
                     continue;
 
@@ -197,10 +197,24 @@ namespace BetterEssenceCorruptionHelper
         private RectangleF? GetDrawRect(EssenceEntityData data)
         {
             var label = data.Label;
-            if (label == null || !label.IsVisible || label.Label == null)
+            if (label == null)
                 return null;
 
-            var rect = GetContentRect(label.Label);
+            // The label can be up to a label scan old and point at memory the game has reused; Render
+            // has no other guard, so an unreadable label just isn't drawn this frame.
+            RectangleF rect;
+            try
+            {
+                if (!label.IsVisible || label.Label is not { } root)
+                    return null;
+
+                rect = GetContentRect(root);
+            }
+            catch
+            {
+                return null;
+            }
+
             if (rect.Width <= 0 || rect.Height <= 0)
                 return null;
 
@@ -225,11 +239,11 @@ namespace BetterEssenceCorruptionHelper
         {
             var state = data.State;
 
-            IIndicatorSettings indicator = state switch
+            IIndicatorSettings? indicator = state switch
             {
                 EssenceState.ShouldCorrupt => _settings.Indicators.CorruptMe,
                 EssenceState.ShouldKill => _settings.Indicators.KillReady,
-                _ => null!
+                _ => null,
             };
 
             if (indicator is null || !indicator.ShowIndicator.Value)
@@ -450,7 +464,7 @@ namespace BetterEssenceCorruptionHelper
         private void DrawMapStatsWindow()
         {
             if (!_settings.MapStats.ShowMapStats.Value ||
-                (_gameController.Area.CurrentArea.IsPeaceful && !_settings.MapStats.ShowInTownHideout.Value))
+                (_gameController.Area.CurrentArea?.IsPeaceful != false && !_settings.MapStats.ShowInTownHideout.Value))
                 return;
 
             var mapStats = _entityTracker.MapStats;

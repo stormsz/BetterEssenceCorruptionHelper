@@ -104,6 +104,15 @@ namespace BetterEssenceCorruptionHelper
         /// <summary>Interval of the freed-monster search after <see cref="FREED_FAST_SEARCH_MS"/>, ms</summary>
         private const int FREED_SLOW_SEARCH_MS = 1000;
 
+        /// <summary>The freed-monster search gives up this long after release (its kill then can't be counted), ms</summary>
+        private const int FREED_SEARCH_GIVE_UP_MS = 60000;
+
+        /// <summary>
+        /// After release the trapped entity keeps its link this long before a recognised look-alike may
+        /// replace it - its imprisoned stat can take a pass or two to clear. ms
+        /// </summary>
+        private const int FREED_REPLACE_GRACE_MS = 500;
+
         /// <summary>How often the trapped monster's identity (mods) is re-read - a Vaal Orb changes them. ms</summary>
         private const int IDENTITY_REFRESH_MS = 500;
 
@@ -122,7 +131,10 @@ namespace BetterEssenceCorruptionHelper
         /// <summary>How long a MonsterInsideMonolith read is trusted before it is read again (ms).</summary>
         private const int IMPRISONED_CHECK_TTL_MS = 1000;
 
-        /// <summary>Map instances whose essences are remembered (a map device opens up to 6 portals)</summary>
+        /// <summary>
+        /// Map instances whose essences are remembered, so going back to an earlier one (its portals still
+        /// open, or after death) resumes it. Older ones are dropped, oldest entered first.
+        /// </summary>
         private const int MAX_MAP_SESSIONS = 8;
 
         /// <summary>Diagnostics summaries are written at most this often, ms</summary>
@@ -172,6 +184,9 @@ namespace BetterEssenceCorruptionHelper
         /// <summary>Cached MonsterInsideMonolith reads by monster ID, so stats aren't re-read every pass.</summary>
         private readonly Dictionary<uint, (bool Imprisoned, long CheckedAtMs)> _imprisonedChecks = new();
 
+        /// <summary>Cached essence-mod reads by monster ID, for the freed-monster search.</summary>
+        private readonly Dictionary<uint, (string Mods, long CheckedAtMs)> _modsChecks = new();
+
         /// <summary>Trapped entities left behind when their monolith opened; never linked as the freed monster.</summary>
         private readonly HashSet<uint> _leftoverMonsters = new();
 
@@ -181,12 +196,14 @@ namespace BetterEssenceCorruptionHelper
         /// rarity (the essence monster is rare, the pack around it white or magic), then closest to the
         /// monolith (trapped only).
         /// </summary>
-        private readonly record struct MonsterCandidate(Entity? Monster, int Match, int Rarity, float Distance, string? Mods)
+        private readonly record struct MonsterCandidate(Entity Monster, int Match, int Rarity, float Distance, string? Mods)
         {
-            public bool IsBetterThan(MonsterCandidate other) =>
-                Match != other.Match ? Match > other.Match :
-                Rarity != other.Rarity ? Rarity > other.Rarity :
-                Distance < other.Distance;
+            public bool IsBetterThan(MonsterCandidate other) => IsBetterThan(other.Match, other.Rarity, other.Distance);
+
+            public bool IsBetterThan(int match, int rarity, float distance) =>
+                Match != match ? Match > match :
+                Rarity != rarity ? Rarity > rarity :
+                Distance < distance;
         }
 
         /// <summary>Monotonic clock for every interval here.</summary>
@@ -205,7 +222,7 @@ namespace BetterEssenceCorruptionHelper
         private readonly TrackerPerformance _performance = new();
 
         private string? _lastError;
-        private long _lastErrorLoggedMs = long.MinValue;
+        private long _lastErrorLoggedMs = -ERROR_LOG_INTERVAL_MS;
 
         // Diagnostics state (only used while Debug > Show Debug Info is on), so the log only gets
         // a line when something actually changes.
@@ -352,6 +369,7 @@ namespace BetterEssenceCorruptionHelper
 
             _monoliths.Clear();
             _imprisonedChecks.Clear();
+            _modsChecks.Clear();
             _leftoverMonsters.Clear();
 
             // Seed again as soon as the new area is trackable: events that arrived before this call
@@ -361,9 +379,9 @@ namespace BetterEssenceCorruptionHelper
             _nextLabelScanMs = 0;
             _nextSafetyLabelScanMs = 0;
 
-            _inMap = area == null || !area.IsPeaceful;
-            if (area != null && _inMap)
-                EnterMap(area.Hash, _clock.ElapsedMilliseconds);
+            _inMap = area is { IsPeaceful: false };
+            if (_inMap)
+                EnterMap(area!.Hash, _clock.ElapsedMilliseconds);
         }
 
         #endregion
@@ -393,7 +411,12 @@ namespace BetterEssenceCorruptionHelper
             }
 
             session.LastEnteredMs = now;
-            _session = session;
+            if (session != _session)
+            {
+                // Prices, strategy or setup may have changed while another map was tracked.
+                _evaluatedFor = (-1, -1, -1);
+                _session = session;
+            }
         }
 
         private static void MarkLoaded(EssenceEntityData data, Entity entity)
@@ -411,6 +434,7 @@ namespace BetterEssenceCorruptionHelper
             data.Entity = null;
             data.Label = null;
             data.LabelSignature = -1;
+            data.UnconfirmedAnalysis = null;
             data.SeenTargetableSinceLoad = false;
             data.UntargetableSinceMs = null;
         }
@@ -533,6 +557,7 @@ namespace BetterEssenceCorruptionHelper
             {
                 data.SeenTargetableSinceLoad = true;
                 data.UntargetableSinceMs = null;
+                data.MonsterFreed = false;
             }
             else
             {
@@ -788,7 +813,7 @@ namespace BetterEssenceCorruptionHelper
                 : EssenceDecision.CorruptedAgainstAdvice;
 
             // The essences changed, and with them the trapped monster's mods: re-read its identity.
-            data.MonsterIdentityReadMs = long.MinValue;
+            data.NextIdentityReadMs = 0;
 
             if (DiagnosticsOn)
             {
@@ -861,9 +886,6 @@ namespace BetterEssenceCorruptionHelper
         /// </param>
         private void HandleEssenceOpened(EssenceEntityData data, long now, bool observed)
         {
-            if (data.IsOpened)
-                return;
-
             data.Phase = EssencePhase.Released;
             data.OpenedAtMs = now;
 
@@ -921,7 +943,7 @@ namespace BetterEssenceCorruptionHelper
                         _seekingTrapped.Add(data);
                 }
                 else if (!data.MonsterFreed && data.HasMonsterIdentity &&
-                         (now - data.OpenedAtMs <= FREED_FAST_SEARCH_MS || slowSearchDue))
+                         (now - data.OpenedAtMs <= FREED_FAST_SEARCH_MS || (slowSearchDue && now - data.OpenedAtMs <= FREED_SEARCH_GIVE_UP_MS)))
                 {
                     _seekingFreed.Add(data);
                 }
@@ -978,8 +1000,17 @@ namespace BetterEssenceCorruptionHelper
 
             if (!data.IsOpened)
             {
-                if (now - data.MonsterIdentityReadMs >= IDENTITY_REFRESH_MS)
+                if (data.UntargetableSinceMs != null)
+                {
+                    // The monolith is breaking but release isn't confirmed yet: note the monster being
+                    // free already, so a kill in the first moments after release still counts.
+                    if (!data.MonsterFreed && GetDeathSignal(monster) == null && IsImprisoned(monster, useCache: false) == false)
+                        data.MonsterFreed = true;
+                }
+                else if (now >= data.NextIdentityReadMs)
+                {
                     RecordIdentity(data, monster, now);
+                }
                 return;
             }
 
@@ -1137,7 +1168,7 @@ namespace BetterEssenceCorruptionHelper
             string? mods = null;
             if (!string.IsNullOrEmpty(data.MonsterEssenceMods))
             {
-                mods = ReadEssenceMods(monster);
+                mods = CachedEssenceMods(monster);
                 if (mods != data.MonsterEssenceMods)
                     return null;
             }
@@ -1190,9 +1221,11 @@ namespace BetterEssenceCorruptionHelper
         /// </summary>
         private void ApplyBestMonsterLinks(long now, bool diagnostics)
         {
-            foreach (var (essenceId, candidate) in _bestCandidates)
+            // Strongest matches first, so a monster wanted by two look-alike essences goes to the one
+            // whose trapped monster had its name.
+            foreach (var (essenceId, candidate) in _bestCandidates.OrderByDescending(c => c.Value.Match))
             {
-                var monster = candidate.Monster!;
+                var monster = candidate.Monster;
                 if (!_session.Essences.TryGetValue(essenceId, out var data) || data.MonsterId == monster.Id ||
                     _session.ByMonsterId.ContainsKey(monster.Id))
                     continue;
@@ -1200,8 +1233,9 @@ namespace BetterEssenceCorruptionHelper
                 var previous = data.MonsterId;
                 if (previous != null)
                 {
-                    var current = new MonsterCandidate(null, string.IsNullOrEmpty(data.MonsterEssenceMods) ? 0 : 1, data.MonsterRarityRank, data.MonsterLinkDistance, null);
-                    if (!data.IsOpened && !candidate.IsBetterThan(current))
+                    if (data.IsOpened
+                            ? now - data.OpenedAtMs < FREED_REPLACE_GRACE_MS
+                            : !candidate.IsBetterThan(string.IsNullOrEmpty(data.MonsterEssenceMods) ? 0 : 1, data.MonsterRarityRank, data.MonsterLinkDistance))
                         continue;
 
                     _session.ByMonsterId.Remove(previous.Value);
@@ -1247,7 +1281,23 @@ namespace BetterEssenceCorruptionHelper
             data.MonsterRenderName = monster.RenderName;
             data.MonsterRarityRank = RarityRank(monster);
             data.MonsterEssenceMods = mods ?? ReadEssenceMods(monster) ?? data.MonsterEssenceMods;
-            data.MonsterIdentityReadMs = now;
+            data.NextIdentityReadMs = now + IDENTITY_REFRESH_MS;
+        }
+
+        /// <summary>
+        /// <see cref="ReadEssenceMods"/> for the freed-monster search, cached per monster for
+        /// <see cref="IMPRISONED_CHECK_TTL_MS"/>: that search re-checks every same-rarity monster each pass.
+        /// </summary>
+        private string? CachedEssenceMods(Entity monster)
+        {
+            var now = _clock.ElapsedMilliseconds;
+            if (_modsChecks.TryGetValue(monster.Id, out var check) && now - check.CheckedAtMs < IMPRISONED_CHECK_TTL_MS)
+                return check.Mods;
+
+            var mods = ReadEssenceMods(monster);
+            if (mods != null)
+                _modsChecks[monster.Id] = (mods, now);
+            return mods;
         }
 
         /// <summary>
@@ -1354,36 +1404,38 @@ namespace BetterEssenceCorruptionHelper
             data.Phase = EssencePhase.Killed;
             var stats = _session.Stats;
 
+            // Count first: recording the outcome below reads the game and could fail.
+            stats.IncrementKilled();
+            _corruptionLog.RecordKill();
+
             switch (data.Decision)
             {
                 case EssenceDecision.CorruptedAsAdvised:
                     stats.IncrementCorrupted();
-                    if (DiagnosticsOn)
-                        DebugWindow.LogMsg($"SUCCESSFUL CORRUPTION CONFIRMED: Essence {data.EntityId} killed", 3, SharpDX.Color.LightGreen);
                     break;
-
                 case EssenceDecision.CorruptedAgainstAdvice:
                     stats.IncrementMistakes();
-                    if (DiagnosticsOn)
-                        DebugWindow.LogMsg($"MISTAKEN CORRUPTION CONFIRMED: Essence {data.EntityId} killed", 3, SharpDX.Color.OrangeRed);
                     break;
-
                 case EssenceDecision.MissedCorruption:
                     stats.IncrementMissed();
                     _corruptionLog.RecordMissed();
-                    if (DiagnosticsOn)
-                        DebugWindow.LogMsg($"MISSED CORRUPTION CONFIRMED: Essence {data.EntityId} killed without corrupting", 3, SharpDX.Color.Orange);
                     break;
             }
 
-            if (data.Corruption is { } corruption)
-                RecordOutcome(data, corruption.Before, corruption.After, data.Decision == EssenceDecision.CorruptedAsAdvised);
-
-            stats.IncrementKilled();
-            _corruptionLog.RecordKill();
-
             if (DiagnosticsOn)
-                DebugWindow.LogMsg($"Essence {data.EntityId}: monster id={data.MonsterId} killed ({signal})", 3, SharpDX.Color.Cyan);
+                DebugWindow.LogMsg($"Essence {data.EntityId}: monster id={data.MonsterId} killed ({signal}), {data.Decision}", 3, SharpDX.Color.Cyan);
+
+            if (data.Corruption is { } corruption)
+            {
+                try
+                {
+                    RecordOutcome(data, corruption.Before, corruption.After, data.Decision == EssenceDecision.CorruptedAsAdvised);
+                }
+                catch (Exception ex)
+                {
+                    DebugWindow.LogError($"[BECH] Could not record the corruption outcome: {ex.Message}");
+                }
+            }
         }
 
         #endregion
@@ -1533,7 +1585,8 @@ namespace BetterEssenceCorruptionHelper
         {
             try
             {
-                if (entity.Address == 0 || !entity.IsValid || !entity.HasComponent<Render>() || !entity.HasComponent<Monolith>())
+                // Monolith membership is known (it is in _monoliths); this filters unreadable or placeholder entities.
+                if (entity.Address == 0 || !entity.IsValid || !entity.HasComponent<Render>())
                     return false;
 
                 var pos = entity.PosNum;
@@ -1632,7 +1685,7 @@ namespace BetterEssenceCorruptionHelper
         public int LabelScans;
         public int LabelsVisited;
         public int Analyses;
-        private int _seeds, _seedVisits;
+        private int _seedVisits;
 
         /// <summary>Snapshot of the last completed one-second window.</summary>
         public Snapshot Last { get; private set; } = new();
@@ -1659,7 +1712,6 @@ namespace BetterEssenceCorruptionHelper
 
         public void RecordSeed(int visited)
         {
-            _seeds++;
             _seedVisits += visited;
             EntityListSize = visited;
         }
@@ -1692,7 +1744,7 @@ namespace BetterEssenceCorruptionHelper
             _windowStartMs = nowMs;
             _ticks = 0;
             _tickTicksTotal = _tickTicksMax = 0;
-            MonolithChecks = MonsterVisits = LabelScans = LabelsVisited = Analyses = _seeds = _seedVisits = 0;
+            MonolithChecks = MonsterVisits = LabelScans = LabelsVisited = Analyses = _seedVisits = 0;
         }
     }
 }

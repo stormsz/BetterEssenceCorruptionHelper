@@ -35,7 +35,7 @@ namespace BetterEssenceCorruptionHelper
             var ui = gameController.IngameState.IngameUi;
             foreach (var (_, get) in BlockingPanels)
             {
-                if (get(ui).IsVisible)
+                if (get(ui)?.IsVisible == true)
                     return true;
             }
 
@@ -53,13 +53,15 @@ namespace BetterEssenceCorruptionHelper
                 return "not in game";
 
             var blockers = new List<string>();
-            if (gameController.Area.CurrentArea.IsPeaceful)
+            if (gameController.IsLoading)
+                blockers.Add("loading");
+            if (gameController.Area.CurrentArea?.IsPeaceful != false)
                 blockers.Add("town/hideout");
 
             var ui = gameController.IngameState.IngameUi;
             foreach (var (name, get) in BlockingPanels)
             {
-                if (get(ui).IsVisible)
+                if (get(ui)?.IsVisible == true)
                     blockers.Add(name);
             }
 
@@ -77,7 +79,11 @@ namespace BetterEssenceCorruptionHelper
                 return (false, false);
 
             var render = !IsAnyBlockingUiVisible(gameController);
-            return (render && !gameController.Area.CurrentArea.IsPeaceful, render);
+
+            // Never track through a loading screen: the old area's entities are going away, and a
+            // freed monster vanishing then is not a kill.
+            var track = render && !gameController.IsLoading && gameController.Area.CurrentArea is { IsPeaceful: false };
+            return (track, render);
         }
     }
 }

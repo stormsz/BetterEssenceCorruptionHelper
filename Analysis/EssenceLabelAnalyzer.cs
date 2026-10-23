@@ -78,11 +78,13 @@ namespace BetterEssenceCorruptionHelper.Analysis
         {
             try
             {
-                var children = label?.Label?.Children;
-                if (children == null || children.Count < 2)
+                // Read every frame: counts and one child by index, without building the child lists.
+                var root = label?.Label;
+                var count = root?.ChildCount ?? 0;
+                if (count < 2)
                     return -1;
 
-                return ((long)children.Count << 32) | (uint)(children[1]?.ChildCount ?? 0);
+                return (count << 32) | (uint)(root!.GetChildAtIndex(1)?.ChildCount ?? 0);
             }
             catch
             {
