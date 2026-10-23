@@ -126,4 +126,15 @@ public class CatalogueTests
 
         Assert.Empty(EssenceCatalogue.TransformCandidates(E("Essence of Delirium")));
     }
+
+    [Fact]
+    public void Natural_essences_excludes_group_f_and_transform_candidates_are_cached()
+    {
+        Assert.Equal(100, EssenceCatalogue.NaturalEssences.Count);
+        Assert.DoesNotContain(EssenceCatalogue.NaturalEssences, e => e.Group == EssenceGroup.F);
+
+        var c1 = EssenceCatalogue.TransformCandidates(E("Deafening Essence of Misery"));
+        var c2 = EssenceCatalogue.TransformCandidates(E("Deafening Essence of Misery"));
+        Assert.Same(c1, c2);
+    }
 }

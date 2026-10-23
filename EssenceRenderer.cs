@@ -9,6 +9,7 @@ using ImGuiNET;
 using SharpDX;
 using System.Collections.Generic;
 using Vector2 = System.Numerics.Vector2;
+using Vector4 = System.Numerics.Vector4;
 
 namespace BetterEssenceCorruptionHelper
 {
@@ -29,7 +30,8 @@ namespace BetterEssenceCorruptionHelper
     /// <param name="corruptionLog">Observed corruption outcomes</param>
     /// <param name="icons">Essence and currency icons</param>
     internal class EssenceRenderer(GameController gameController, Settings settings, EssenceEntityTracker entityTracker,
-        PriceBook prices, EssenceValues values, SetupDetector setup, CorruptionLog corruptionLog, EssenceIcons? icons = null)
+        PriceBook prices, EssenceValues values, SetupDetector setup, CorruptionLog corruptionLog, EssenceIcons? icons = null,
+        InventoryScanner? inventory = null)
     {
         #region Fields
 
@@ -41,13 +43,11 @@ namespace BetterEssenceCorruptionHelper
         private readonly SetupDetector _setup = setup;
         private readonly CorruptionLog _corruptionLog = corruptionLog;
         private readonly EssenceIcons? _icons = icons;
+        private readonly InventoryScanner? _inventory = inventory;
 
         /// <summary>Debug overlay content (and its ImGui window name) per essence, rebuilt only when its inputs change.</summary>
         private readonly Dictionary<uint, (int Key, List<DebugLine> Lines, float Width, string WindowName)> _debugCache = new();
 
-        /// <summary>Inputs the stats window text was built from; the stats object changes with the map.</summary>
-        private (MapStatistics?, int, int, int, int) _statsKey = (null, -1, -1, -1, -1);
-        private readonly List<(string Text, Color Color)> _statsLines = new();
 
         #endregion
 
@@ -62,6 +62,7 @@ namespace BetterEssenceCorruptionHelper
             if (!canRender)
                 return;
 
+            DrawVaalOrbBanner();
             DrawEssenceIndicators();
             DrawMapStatsWindow();
         }
@@ -76,6 +77,68 @@ namespace BetterEssenceCorruptionHelper
         /// <summary>
         /// Main rendering method - draws all essence indicators and debug windows.
         /// </summary>
+        /// <summary>
+        /// Displays a prominent on-screen warning banner when running in a map below the configured Vaal Orb threshold.
+        /// </summary>
+        private void DrawVaalOrbBanner()
+        {
+            if (_inventory == null || !_settings.VaalOrbAlert.EnableAlert.Value || !_settings.VaalOrbAlert.ShowWarningBanner.Value)
+                return;
+
+            if (_settings.Tracking.Strategy.Mode == StrategyMode.NoCorruption)
+                return;
+
+            if (_gameController.Area.CurrentArea?.IsPeaceful != false)
+                return;
+
+            var count = _inventory.VaalOrbCount;
+            var minThreshold = _settings.VaalOrbAlert.MinVaalOrbs.Value;
+            if (count >= minThreshold)
+                return;
+
+            var windowRect = _gameController.Window.GetWindowRectangle();
+            var centerX = windowRect.Width / 2f;
+
+            ImGui.SetNextWindowPos(new Vector2(centerX, 68f), ImGuiCond.Always, new Vector2(0.5f, 0f));
+
+            var isZero = count == 0;
+            var bgCol = new Vector4(0.08f, 0.09f, 0.12f, 0.92f);
+            var borderCol = isZero ? new Vector4(0.95f, 0.25f, 0.25f, 0.95f) : new Vector4(0.95f, 0.60f, 0.10f, 0.95f);
+            var textCol = isZero ? new Vector4(1.0f, 0.35f, 0.30f, 1.0f) : new Vector4(1.0f, 0.70f, 0.20f, 1.0f);
+
+            ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 6.0f);
+            ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(10f, 5f));
+            ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 1.5f);
+            ImGui.PushStyleColor(ImGuiCol.WindowBg, bgCol);
+            ImGui.PushStyleColor(ImGuiCol.Border, borderCol);
+
+            const ImGuiWindowFlags flags = ImGuiWindowFlags.NoDecoration |
+                                          ImGuiWindowFlags.AlwaysAutoResize |
+                                          ImGuiWindowFlags.NoSavedSettings |
+                                          ImGuiWindowFlags.NoFocusOnAppearing |
+                                          ImGuiWindowFlags.NoNav |
+                                          ImGuiWindowFlags.NoInputs;
+
+            if (ImGui.Begin("##bechVaalOrbWarningBanner", flags))
+            {
+                if (_icons?.For("Vaal") is { } vaalIcon)
+                {
+                    ImGui.Image(vaalIcon, new Vector2(18f, 18f));
+                    ImGui.SameLine(0f, 6f);
+                }
+
+                var text = isZero
+                    ? "NO VAAL ORBS IN INVENTORY - Monoliths cannot be corrupted!"
+                    : $"LOW VAAL ORBS: {count} left (threshold: {minThreshold})";
+                ImGui.TextColored(textCol, text);
+            }
+
+            ImGui.End();
+
+            ImGui.PopStyleColor(2);
+            ImGui.PopStyleVar(3);
+        }
+
         private void DrawEssenceIndicators()
         {
             if (!_settings.Indicators.EnableAllIndicators.Value)
@@ -249,21 +312,142 @@ namespace BetterEssenceCorruptionHelper
             if (indicator is null || !indicator.ShowIndicator.Value)
                 return;
 
+            var isCorruptTarget = state == EssenceState.ShouldCorrupt;
+            var corruptMe = _settings.Indicators.CorruptMe;
+            var highlightButton = isCorruptTarget && corruptMe.HighlightVaalButton.Value;
             var showValue = _settings.Indicators.ShowValueRange.Value;
-            if (!indicator.DrawBorder.Value && !indicator.DrawText.Value && !showValue)
+
+            if (!indicator.DrawBorder.Value && !indicator.DrawText.Value && !highlightButton && !showValue)
                 return;
 
-            var isCorruptTarget = state == EssenceState.ShouldCorrupt;
+            var hasNoVaalOrbs = isCorruptTarget &&
+                                _inventory != null &&
+                                _settings.VaalOrbAlert.EnableAlert.Value &&
+                                _settings.VaalOrbAlert.WarnOnLabel.Value &&
+                                _settings.Tracking.Strategy.Mode != StrategyMode.NoCorruption &&
+                                _inventory.VaalOrbCount == 0;
 
+            // 1. Highlight the monolith card if enabled
             if (indicator.DrawBorder.Value)
                 DrawStatusBox(drawRect, indicator);
 
-            if (indicator.DrawText.Value)
-                DrawStatusText(drawRect, indicator, isCorruptTarget);
+            // 2. Highlight the Vaal button at the bottom of the card if enabled
+            // If the user has 0 Vaal Orbs, the in-game button does not appear on the card!
+            if (highlightButton && !hasNoVaalOrbs)
+            {
+                var buttonRect = GetVaalButtonRect(data.Label?.Label, drawRect);
+                DrawVaalButtonHighlight(buttonRect, corruptMe);
+            }
 
-            // The expected gain matters where a Vaal Orb is being considered: on CORRUPT monsters only.
+            // 3. Draw above-label status indicator (Vaal Icon or Text)
+            var drewStatus = false;
+            if (indicator.DrawText.Value)
+            {
+                if (hasNoVaalOrbs)
+                {
+                    DrawStatusText(drawRect, indicator, isCorruptTarget, "NO VAAL ORBS", Color.Red);
+                    drewStatus = true;
+                }
+                else if (isCorruptTarget && corruptMe.ShowVaalIcon.Value && _icons?.For("Vaal") is { } vaalIcon)
+                {
+                    DrawStatusVaalIcon(drawRect, vaalIcon, corruptMe.BorderColor.Value);
+                    drewStatus = true;
+                }
+                else
+                {
+                    DrawStatusText(drawRect, indicator, isCorruptTarget);
+                    drewStatus = true;
+                }
+            }
+
+            // 4. Expected value gain line above status indicator
             if (showValue && isCorruptTarget && GetAssessment(data) is { } assessment && data.ValueText != null)
-                DrawValueText(drawRect, data.ValueText, assessment.ExpectedNetGain >= 0 ? Color.LimeGreen : Color.Orange, indicator.DrawText.Value);
+                DrawValueText(drawRect, data.ValueText, assessment.ExpectedNetGain >= 0 ? Color.LimeGreen : Color.Orange, drewStatus, !hasNoVaalOrbs && isCorruptTarget && corruptMe.ShowVaalIcon.Value);
+        }
+
+        private static RectangleF GetVaalButtonRect(Element? root, RectangleF cardRect)
+        {
+            if (root != null)
+            {
+                try
+                {
+                    for (var i = 2; i < root.ChildCount; i++)
+                    {
+                        var child = root.GetChildAtIndex(i);
+                        if (child == null || !child.IsVisible)
+                            continue;
+
+                        var r = child.GetClientRectCache;
+                        if (r.Width >= 12 && r.Height >= 12 && r.Width <= 70 && r.Height <= 70)
+                            return r;
+
+                        if (child.ChildCount > 0)
+                        {
+                            for (var j = 0; j < child.ChildCount; j++)
+                            {
+                                var subChild = child.GetChildAtIndex(j);
+                                if (subChild == null || !subChild.IsVisible)
+                                    continue;
+
+                                var sr = subChild.GetClientRectCache;
+                                if (sr.Width >= 12 && sr.Height >= 12 && sr.Width <= 70 && sr.Height <= 70)
+                                    return sr;
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // Fall back to estimated position below
+                }
+            }
+
+            // Fallback: estimate button directly at bottom center of the monolith card
+            const float btnSize = 28f;
+            var centerX = cardRect.Center.X;
+            var top = cardRect.Bottom;
+            return new RectangleF(centerX - btnSize / 2f, top, btnSize, btnSize);
+        }
+
+        private static void DrawVaalButtonHighlight(RectangleF buttonRect, CorruptMeSettings corruptMe)
+        {
+            var drawList = ImGui.GetBackgroundDrawList();
+            var min = new Vector2(buttonRect.Left, buttonRect.Top);
+            var max = new Vector2(buttonRect.Right, buttonRect.Bottom);
+            var borderColor = ToImguiVec4(corruptMe.BorderColor.Value);
+
+            if (corruptMe.BackgroundFill.Value)
+            {
+                var baseColor = corruptMe.BorderColor.Value;
+                var fillColor = ToImguiVec4(new SharpDX.Color(
+                    baseColor.R,
+                    baseColor.G,
+                    baseColor.B,
+                    (byte)(corruptMe.BackgroundOpacity.Value * 255)));
+                drawList.AddRectFilled(min, max, ImGui.GetColorU32(fillColor), 4f);
+            }
+
+            drawList.AddRect(min, max, ImGui.GetColorU32(borderColor), 4f, ImDrawFlags.None, 2.5f);
+        }
+
+        private static void DrawStatusVaalIcon(RectangleF rect, nint vaalIcon, Color borderColor)
+        {
+            var drawList = ImGui.GetBackgroundDrawList();
+            var iconSize = new Vector2(24f, 24f);
+            var center = new Vector2(rect.Center.X, rect.Top - 22f);
+
+            var bgMin = new Vector2(center.X - iconSize.X / 2f - 4f, center.Y - iconSize.Y / 2f - 3f);
+            var bgMax = new Vector2(center.X + iconSize.X / 2f + 4f, center.Y + iconSize.Y / 2f + 3f);
+
+            var bgColor = ToImguiVec4(new SharpDX.Color(0, 0, 0, 200));
+            var borderVec = ToImguiVec4(borderColor);
+
+            drawList.AddRectFilled(bgMin, bgMax, ImGui.GetColorU32(bgColor), 4f);
+            drawList.AddRect(bgMin, bgMax, ImGui.GetColorU32(borderVec), 4f, ImDrawFlags.None, 1.2f);
+
+            var iconMin = new Vector2(center.X - iconSize.X / 2f, center.Y - iconSize.Y / 2f);
+            var iconMax = new Vector2(center.X + iconSize.X / 2f, center.Y + iconSize.Y / 2f);
+            drawList.AddImage(vaalIcon, iconMin, iconMax);
         }
 
         /// <summary>
@@ -299,20 +483,21 @@ namespace BetterEssenceCorruptionHelper
         /// <summary>
         /// Draws "CORRUPT" or "KILL" text above essence label.
         /// </summary>
-        private void DrawStatusText(RectangleF rect, IIndicatorSettings indicator, bool isCorruptTarget)
+        private void DrawStatusText(RectangleF rect, IIndicatorSettings indicator, bool isCorruptTarget, string? overrideText = null, Color? overrideColor = null)
         {
-            var text = isCorruptTarget ? "CORRUPT" : "KILL";
+            var text = overrideText ?? (isCorruptTarget ? "CORRUPT" : "KILL");
+            var textColor = overrideColor ?? indicator.TextColor.Value;
 
             // Position text 25 pixels above the essence label
             var textPos = new Vector2(rect.Center.X, rect.Top - 25);
-            DrawCenteredTextWithBackground(textPos, text, indicator.TextColor.Value);
+            DrawCenteredTextWithBackground(textPos, text, textColor);
         }
 
-        /// <summary>Draws the value range line above the status text (or where it would be).</summary>
-        private static void DrawValueText(RectangleF rect, string text, Color color, bool belowStatusText)
+        /// <summary>Draws the value range line above the status indicator (text or icon).</summary>
+        private static void DrawValueText(RectangleF rect, string text, Color color, bool belowStatusIndicator, bool isVaalIcon = false)
         {
-            var lineHeight = ImGui.GetTextLineHeight() + 12;
-            var y = rect.Top - 25 - (belowStatusText ? lineHeight : 0);
+            var spacing = isVaalIcon ? 34f : ImGui.GetTextLineHeight() + 12f;
+            var y = rect.Top - 25f - (belowStatusIndicator ? spacing : 0f);
             DrawCenteredTextWithBackground(new Vector2(rect.Center.X, y), text, color);
         }
 
@@ -459,7 +644,7 @@ namespace BetterEssenceCorruptionHelper
         }
 
         /// <summary>
-        /// Draws map statistics window
+        /// Renders the sleek modern map statistics window using a clean 3-column table HUD widget.
         /// </summary>
         private void DrawMapStatsWindow()
         {
@@ -468,99 +653,179 @@ namespace BetterEssenceCorruptionHelper
                 return;
 
             var mapStats = _entityTracker.MapStats;
-            var key = (mapStats, mapStats.Version, _corruptionLog.Version, _settings.Tracking.Version, _setup.Version);
-            if (key != _statsKey)
-            {
-                _statsKey = key;
-                BuildStatsLines(mapStats);
-            }
 
-            // Apply custom window styling
+            // Apply modern HUD styling: smooth rounded corners, compact padding, and dark palette
+            ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 6.0f);
+            ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(10f, 8f));
+            ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(4f, 2f));
+            ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(6f, 4f));
+
             ImGui.PushStyleColor(ImGuiCol.TitleBg, ToImguiVec4(_settings.MapStats.TitleBackground.Value));
             ImGui.PushStyleColor(ImGuiCol.TitleBgActive, ToImguiVec4(_settings.MapStats.TitleBackground.Value));
             ImGui.PushStyleColor(ImGuiCol.WindowBg, ToImguiVec4(_settings.MapStats.ContentBackground.Value));
             ImGui.PushStyleColor(ImGuiCol.Border, ToImguiVec4(_settings.MapStats.BorderColor.Value));
             ImGui.PushStyleColor(ImGuiCol.Text, ToImguiVec4(_settings.MapStats.TitleColor.Value));
+            ImGui.PushStyleColor(ImGuiCol.TableHeaderBg, new Vector4(0.12f, 0.14f, 0.18f, 0.95f));
+            ImGui.PushStyleColor(ImGuiCol.TableRowBg, new Vector4(0.00f, 0.00f, 0.00f, 0.00f));
+            ImGui.PushStyleColor(ImGuiCol.TableRowBgAlt, new Vector4(1.0f, 1.0f, 1.0f, 0.035f));
+            ImGui.PushStyleColor(ImGuiCol.Separator, new Vector4(0.35f, 0.38f, 0.45f, 0.40f));
 
-            // Begin window. As above, End() is unconditional - only the body is gated on the
-            // return value (false means collapsed/clipped, not "no window was pushed").
-            if (ImGui.Begin("Essence Map Stats"))
+            const ImGuiWindowFlags windowFlags = ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoCollapse;
+            if (ImGui.Begin("Essence Tracker###EssenceMapStats", windowFlags))
             {
-                ImGui.TextColored(ToImguiVec4(SharpDX.Color.White), "Map Totals");
-                ImGui.Separator();
-
-                foreach (var (text, color) in _statsLines)
+                // Clamp window position to screen bounds so it cannot be dragged off-screen / hidden
+                var windowRect = _gameController.Window.GetWindowRectangleTimeCache;
+                if (windowRect.Width > 0 && windowRect.Height > 0)
                 {
-                    if (text.Length == 0)
-                        ImGui.Separator();
-                    else
-                        ImGui.TextColored(ToImguiVec4(color), text);
+                    var pos = ImGui.GetWindowPos();
+                    var size = ImGui.GetWindowSize();
+                    var maxX = Math.Max(0f, windowRect.Width - size.X);
+                    var maxY = Math.Max(0f, windowRect.Height - size.Y);
+                    var clampedX = Math.Clamp(pos.X, 0f, maxX);
+                    var clampedY = Math.Clamp(pos.Y, 0f, maxY);
+
+                    if (Math.Abs(clampedX - pos.X) > 1f || Math.Abs(clampedY - pos.Y) > 1f)
+                    {
+                        ImGui.SetWindowPos(new Vector2(clampedX, clampedY));
+                    }
+                }
+
+                var contentColor = ToImguiVec4(_settings.MapStats.TextColor.Value);
+                var mutedColor = new Vector4(0.60f, 0.63f, 0.70f, 1.0f);
+                var goldColor = new Vector4(0.90f, 0.75f, 0.45f, 1.0f);
+                var orangeColor = new Vector4(1.0f, 0.65f, 0.0f, 1.0f);
+                var redColor = new Vector4(1.0f, 0.35f, 0.30f, 1.0f);
+                var greenColor = new Vector4(0.40f, 0.90f, 0.45f, 1.0f);
+
+                // Strategy Header
+                ImGui.TextColored(mutedColor, "Strategy:");
+                ImGui.SameLine();
+                ImGui.TextColored(goldColor, _settings.Tracking.Strategy.DisplayName);
+
+                if (SetupStatus.Describe(_settings.Tracking.Strategy, _setup) is { } warning)
+                {
+                    var warnColor = warning.Level == SetupStatus.Level.Problem ? redColor : orangeColor;
+                    ImGui.TextColored(warnColor, $"[!] {warning.Title}");
+                }
+
+                // Vaal Orb Alert
+                if (_inventory != null && _settings.VaalOrbAlert.EnableAlert.Value && _settings.Tracking.Strategy.Mode != StrategyMode.NoCorruption)
+                {
+                    var vaalCount = _inventory.VaalOrbCount;
+                    var minThreshold = _settings.VaalOrbAlert.MinVaalOrbs.Value;
+                    if (vaalCount < minThreshold)
+                    {
+                        var alertColor = vaalCount == 0 ? redColor : orangeColor;
+                        var alertMsg = vaalCount == 0
+                            ? "No Vaal Orbs in inventory!"
+                            : $"Low Vaal Orbs: {vaalCount} left (min {minThreshold})";
+                        ImGui.TextColored(alertColor, alertMsg);
+                        if (ImGui.IsItemHovered())
+                        {
+                            ImGui.SetTooltip(vaalCount == 0
+                                ? "Your strategy requires Vaal Orbs to corrupt essences, but you have 0 in inventory.\nThe corrupt button on monoliths will not appear!"
+                                : $"You have {vaalCount} Vaal Orbs in your inventory, which is below your alert threshold of {minThreshold}.");
+                        }
+                    }
+                }
+
+                ImGui.Spacing();
+
+                // 3-Column Table: Metric | Map | Session
+                const ImGuiTableFlags tableFlags = ImGuiTableFlags.BordersInnerH | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp;
+                if (ImGui.BeginTable("##bechStatsTable", 3, tableFlags))
+                {
+                    ImGui.TableSetupColumn("Metric", ImGuiTableColumnFlags.WidthStretch, 1.3f);
+                    ImGui.TableSetupColumn("Map", ImGuiTableColumnFlags.WidthStretch, 0.8f);
+                    ImGui.TableSetupColumn("Session", ImGuiTableColumnFlags.WidthStretch, 0.9f);
+                    ImGui.TableHeadersRow();
+
+                    // Row 1: Killed
+                    ImGui.TableNextRow();
+                    ImGui.TableNextColumn();
+                    ImGui.TextColored(mutedColor, "Killed");
+                    ImGui.TableNextColumn();
+                    ImGui.TextColored(contentColor, mapStats.TotalKilled.ToString());
+                    ImGui.TableNextColumn();
+                    ImGui.TextColored(contentColor, _corruptionLog.TotalKilled.ToString());
+
+                    // Row 2: Corrupted
+                    ImGui.TableNextRow();
+                    ImGui.TableNextColumn();
+                    ImGui.TextColored(mutedColor, "Corrupted");
+                    ImGui.TableNextColumn();
+                    ImGui.TextColored(contentColor, mapStats.TotalCorrupted.ToString());
+                    ImGui.TableNextColumn();
+                    ImGui.TextColored(contentColor, _corruptionLog.Total.ToString());
+
+                    // Row 3: Missed
+                    ImGui.TableNextRow();
+                    ImGui.TableNextColumn();
+                    ImGui.TextColored(mutedColor, "Missed");
+                    ImGui.TableNextColumn();
+                    var mapMissedColor = mapStats.TotalMissed > 0 ? orangeColor : mutedColor;
+                    ImGui.TextColored(mapMissedColor, mapStats.TotalMissed.ToString());
+                    ImGui.TableNextColumn();
+                    var sessMissedColor = _corruptionLog.TotalMissed > 0 ? orangeColor : mutedColor;
+                    ImGui.TextColored(sessMissedColor, _corruptionLog.TotalMissed.ToString());
+
+                    // Row 4: Mistakes
+                    ImGui.TableNextRow();
+                    ImGui.TableNextColumn();
+                    ImGui.TextColored(mutedColor, "Mistakes");
+                    ImGui.TableNextColumn();
+                    var mapMistakesColor = mapStats.TotalMistakes > 0 ? redColor : mutedColor;
+                    ImGui.TextColored(mapMistakesColor, mapStats.TotalMistakes.ToString());
+                    ImGui.TableNextColumn();
+                    var sessMistakesColor = _corruptionLog.TotalMistakes > 0 ? redColor : mutedColor;
+                    ImGui.TextColored(sessMistakesColor, _corruptionLog.TotalMistakes.ToString());
+                    if (_corruptionLog.TotalMistakes > 0 && ImGui.IsItemHovered())
+                    {
+                        ImGui.SetTooltip($"{_corruptionLog.MistakenCorruptions} wrong corruptions, {_corruptionLog.TotalMissed} missed opportunities");
+                    }
+
+                    ImGui.EndTable();
+                }
+
+                // Session Outcomes & Profit footer
+                if (_corruptionLog.Total > 0)
+                {
+                    ImGui.Spacing();
+                    ImGui.Separator();
+                    ImGui.Spacing();
+
+                    if (_corruptionLog.RealizedGainCount > 0)
+                    {
+                        var gain = _corruptionLog.RealizedGainSum;
+                        var profitColor = gain >= 0 ? greenColor : redColor;
+                        ImGui.TextColored(mutedColor, "Realized Net:");
+                        ImGui.SameLine();
+                        ImGui.TextColored(profitColor, Format.SignedChaos(gain));
+                        ImGui.SameLine();
+                        ImGui.TextColored(mutedColor, $"({_corruptionLog.RealizedGainCount} logged)");
+                    }
+
+                    var parts = new List<string>();
+                    foreach (var outcome in System.Enum.GetValues<CorruptionOutcome>())
+                    {
+                        var count = _corruptionLog.CountOf(outcome);
+                        if (count > 0)
+                            parts.Add($"{OutcomeName(outcome)}: {count}");
+                    }
+                    if (_corruptionLog.Unclassified > 0)
+                        parts.Add($"unclassified: {_corruptionLog.Unclassified}");
+
+                    if (parts.Count > 0)
+                    {
+                        ImGui.TextColored(new Vector4(0.55f, 0.58f, 0.65f, 1.0f), string.Join("  ·  ", parts));
+                    }
                 }
             }
 
             ImGui.End();
 
-            ImGui.PopStyleColor(5);
-        }
-
-        /// <summary>Stats window text - rebuilt only when the stats, the outcome log or the strategy change.</summary>
-        private void BuildStatsLines(MapStatistics mapStats)
-        {
-            _statsLines.Clear();
-            var statColor = _settings.MapStats.TextColor.Value;
-
-            // Map Totals
-            _statsLines.Add(($"  Killed: {mapStats.TotalKilled}", statColor));
-            _statsLines.Add(($"  Corrupted: {mapStats.TotalCorrupted}", statColor));
-            _statsLines.Add(($"  Missed: {mapStats.TotalMissed}", mapStats.TotalMissed > 0 ? Color.Orange : statColor));
-            _statsLines.Add(($"  Wrongly corrupted: {mapStats.TotalMistakes}", mapStats.TotalMistakes > 0 ? Color.OrangeRed : statColor));
-
-            _statsLines.Add(("", statColor));
-            _statsLines.Add(($"Strategy: {_settings.Tracking.Strategy.DisplayName}", Color.LightSkyBlue));
-            if (SetupStatus.Describe(_settings.Tracking.Strategy, _setup) is { } warning)
-                _statsLines.Add((warning.Title, warning.Level == SetupStatus.Level.Problem ? Color.OrangeRed : Color.Yellow));
-
-            // Session Totals
-            _statsLines.Add(("", statColor));
-            _statsLines.Add(("Session Totals", Color.White));
-            _statsLines.Add(($"  Killed: {_corruptionLog.TotalKilled}", statColor));
-
-            var corruptLine = _corruptionLog.MistakenCorruptions > 0
-                ? $"  Corrupted: {_corruptionLog.Total} ({_corruptionLog.RecommendedCorruptions} ok · {_corruptionLog.MistakenCorruptions} wrong)"
-                : $"  Corrupted: {_corruptionLog.Total}";
-            _statsLines.Add((corruptLine, statColor));
-
-            _statsLines.Add(($"  Missed: {_corruptionLog.TotalMissed}", _corruptionLog.TotalMissed > 0 ? Color.Orange : statColor));
-
-            var totalMistakes = _corruptionLog.TotalMistakes;
-            var mistakeColor = totalMistakes > 0 ? Color.OrangeRed : Color.LightGreen;
-            var mistakeBreakdown = totalMistakes > 0
-                ? $" ({_corruptionLog.MistakenCorruptions} wrong · {_corruptionLog.TotalMissed} missed)"
-                : "";
-            _statsLines.Add(($"  Mistakes: {totalMistakes}{mistakeBreakdown}", mistakeColor));
-
-            if (_corruptionLog.Total > 0)
-            {
-                var parts = new List<string>();
-                foreach (var outcome in System.Enum.GetValues<CorruptionOutcome>())
-                {
-                    var count = _corruptionLog.CountOf(outcome);
-                    if (count > 0)
-                        parts.Add($"{OutcomeName(outcome)} {count}");
-                }
-                if (_corruptionLog.Unclassified > 0)
-                    parts.Add($"unclassified {_corruptionLog.Unclassified}");
-
-                if (parts.Count > 0)
-                    _statsLines.Add(($"  Outcomes: {string.Join(" · ", parts)}", Color.LightGray));
-
-                if (_corruptionLog.RealizedGainCount > 0)
-                {
-                    var gain = _corruptionLog.RealizedGainSum;
-                    _statsLines.Add(($"  Realised {Format.SignedChaos(gain)} over {_corruptionLog.RealizedGainCount} (listing prices)",
-                        gain >= 0 ? Color.LimeGreen : Color.OrangeRed));
-                }
-            }
+            ImGui.PopStyleColor(9);
+            ImGui.PopStyleVar(4);
         }
 
         #endregion

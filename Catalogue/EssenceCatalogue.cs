@@ -53,9 +53,13 @@ namespace BetterEssenceCorruptionHelper.Catalogue
             _all.ToDictionary(e => (e.TypeName, e.Tier));
         private static readonly Dictionary<string, EssenceGroup> _groupByType =
             _all.GroupBy(e => e.TypeName).ToDictionary(g => g.Key, g => g.First().Group);
+        private static readonly Dictionary<EssenceEntry, EssenceEntry[]> _transformCandidates = BuildTransformCandidates();
 
         /// <summary>All entries, group A..F, lowest tier first within each type.</summary>
         public static IReadOnlyList<EssenceEntry> All => _all;
+
+        /// <summary>All natural essences (Groups A–E), excluding the corruption-only Group F.</summary>
+        public static IReadOnlyList<EssenceEntry> NaturalEssences { get; } = _all.Where(e => e.Group != EssenceGroup.F).ToArray();
 
         /// <summary>All entries plus the Vaal Orb - everything the price book samples.</summary>
         public static IReadOnlyList<MarketItem> MarketItems { get; } = _all.Select(e => e.Item).Append(VaalOrb).ToArray();
@@ -97,18 +101,33 @@ namespace BetterEssenceCorruptionHelper.Catalogue
         /// next group at the same tier, raised to the next group's lowest tier if needed (poewiki:
         /// "Muttering Essence of Fear will upgrade into a Weeping Tier C Essence"). Group E becomes one
         /// of the four Group F essences whatever its tier. Empty for Group F.
+        /// Precomputed and cached to avoid allocations during evaluation and rendering.
         /// </summary>
-        public static IReadOnlyList<EssenceEntry> TransformCandidates(EssenceEntry entry)
+        public static IReadOnlyList<EssenceEntry> TransformCandidates(EssenceEntry entry) =>
+            _transformCandidates.TryGetValue(entry, out var candidates) ? candidates : [];
+
+        private static Dictionary<EssenceEntry, EssenceEntry[]> BuildTransformCandidates()
         {
-            if (entry.Group == EssenceGroup.F)
-                return [];
+            var dict = new Dictionary<EssenceEntry, EssenceEntry[]>(_all.Length);
+            foreach (var entry in _all)
+            {
+                if (entry.Group == EssenceGroup.F)
+                {
+                    dict[entry] = [];
+                    continue;
+                }
 
-            var next = entry.Group + 1;
-            if (next == EssenceGroup.F)
-                return _all.Where(e => e.Group == EssenceGroup.F).ToArray();
+                var next = entry.Group + 1;
+                if (next == EssenceGroup.F)
+                {
+                    dict[entry] = _all.Where(e => e.Group == EssenceGroup.F).ToArray();
+                    continue;
+                }
 
-            var tier = entry.Tier < MinTier(next) ? MinTier(next) : entry.Tier;
-            return TypesIn(next).Select(type => Find(type, tier)!).ToArray();
+                var tier = entry.Tier < MinTier(next) ? MinTier(next) : entry.Tier;
+                dict[entry] = TypesIn(next).Select(type => Find(type, tier)!).ToArray();
+            }
+            return dict;
         }
 
         private static EssenceEntry[] Build()

@@ -223,11 +223,8 @@ namespace BetterEssenceCorruptionHelper.Analysis
         {
             var max = 0d;
             unpricedNaturals = 0;
-            foreach (var e in EssenceCatalogue.All)
+            foreach (var e in EssenceCatalogue.NaturalEssences)
             {
-                if (e.Group == EssenceGroup.F)
-                    continue;
-
                 if (price(e) is { } p)
                     max = Math.Max(max, p);
                 else
@@ -268,8 +265,8 @@ namespace BetterEssenceCorruptionHelper.Analysis
             if (tiers.Count == 0)
                 tiers.Add(EssenceTier.Shrieking);
 
-            var candidates = EssenceCatalogue.All
-                .Where(e => e.Group != EssenceGroup.F && tiers.Contains(e.Tier))
+            var candidates = EssenceCatalogue.NaturalEssences
+                .Where(e => tiers.Contains(e.Tier))
                 .ToList();
 
             double expected = 0;
@@ -325,8 +322,11 @@ namespace BetterEssenceCorruptionHelper.Analysis
 
         private static OutcomeRange ResonanceReplace(IReadOnlyList<EssenceEntry> essences, double current, Func<EssenceEntry, double> price)
         {
-            // Every essence becomes a copy of one of them: n copies of the chosen essence.
             var n = essences.Count;
+            if (n == 0)
+                return new OutcomeRange(CorruptionOutcome.ResonanceReplace, 0, 0, 0);
+
+            // Every essence becomes a copy of one of them: n copies of the chosen essence.
             double min = double.MaxValue, max = double.MinValue, sum = 0;
             foreach (var chosen in essences)
             {

@@ -1,6 +1,7 @@
 using ExileCore;
 using System.Collections.Generic;
 using System.IO;
+using BetterEssenceCorruptionHelper.Catalogue;
 
 namespace BetterEssenceCorruptionHelper.UI
 {
@@ -8,8 +9,8 @@ namespace BetterEssenceCorruptionHelper.UI
     /// One inventory icon per essence type (the Deafening art, and the four corruption-only essences),
     /// from poewiki, 32x32. They are embedded in the plugin DLL - so Source and Compiled installs work
     /// alike - written to the plugin's config folder on first use, and loaded with ExileCore's
-    /// Graphics.InitImage, like ExpeditionIcons loads its icon sheet. Loaded lazily on the render
-    /// thread, the first time the settings page is drawn.
+    /// Graphics.InitImage, like ExpeditionIcons loads its icon sheet. Preloaded on startup to avoid
+    /// render thread stalls.
     /// </summary>
     internal sealed class EssenceIcons(Graphics graphics, string directory)
     {
@@ -25,7 +26,18 @@ namespace BetterEssenceCorruptionHelper.UI
         private const int RetryDelayMs = 5000;
         private long _nextAttemptMs;
 
+        /// <summary>Eagerly unpacks resources and loads textures at plugin startup, avoiding disk I/O during render.</summary>
+        public void Preload()
+        {
+            if (_attemptsLeft > 0)
+                Load();
+        }
+
         /// <summary>The icon texture for an essence type ("Misery", "Horror"), or null when unavailable.</summary>
+        public nint? For(EssenceEntry essence) =>
+            For(essence.Name) ?? For(essence.TypeName);
+
+        /// <summary>The icon texture for an essence by full name ("Whispering Essence of Contempt") or type ("Contempt", "Horror").</summary>
         public nint? For(string typeName)
         {
             if (_attemptsLeft > 0 && System.Environment.TickCount64 >= _nextAttemptMs)

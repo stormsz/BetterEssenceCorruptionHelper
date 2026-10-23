@@ -23,6 +23,7 @@ namespace BetterEssenceCorruptionHelper
         private PriceBook? _prices;
         private EssenceValues? _values;
         private SetupDetector? _setup;
+        private InventoryScanner? _inventoryScanner;
         private Action? _catalogueDraw;
         private Action? _diagnosticsDraw;
         private Action? _indicatorPreviewDraw;
@@ -47,17 +48,30 @@ namespace BetterEssenceCorruptionHelper
             if (Settings.Tracking.Normalize() is { } note)
                 DebugWindow.LogMsg($"[{Name}] settings repaired: {note}", 5, SharpDX.Color.Yellow);
 
+            // Migrate legacy harsh bright cyan title background to modern sleek palette
+            if (Settings.MapStats.TitleBackground.Value == new SharpDX.Color(0, 157, 255, 200))
+            {
+                Settings.MapStats.TitleBackground.Value = new SharpDX.Color(24, 26, 33, 240);
+                Settings.MapStats.ContentBackground.Value = new SharpDX.Color(14, 16, 20, 230);
+                Settings.MapStats.TitleColor.Value = new SharpDX.Color(230, 215, 175);
+                Settings.MapStats.TextColor.Value = new SharpDX.Color(225, 228, 235);
+                Settings.MapStats.BorderColor.Value = new SharpDX.Color(60, 64, 75, 200);
+            }
+
             _priceBridge = new NinjaPriceBridge(GameController, () => PluginManager);
             _prices = new PriceBook(EssenceCatalogue.MarketItems, _priceBridge.Resolve, () => _clock.ElapsedMilliseconds, _priceBridge.GetStatus);
             _values = new EssenceValues(_prices);
             _setup = new SetupDetector(GameController);
+            _inventoryScanner = new InventoryScanner(GameController);
 
             var icons = new EssenceIcons(Graphics, Path.Join(ConfigDirectory, "icons"));
+            icons.Preload();
+
             _entityTracker = new EssenceEntityTracker(GameController, Settings, _corruptionLog, _prices, _values, _setup, OutcomeCsvPath);
-            _renderer = new EssenceRenderer(GameController, Settings, _entityTracker, _prices, _values, _setup, _corruptionLog, icons);
+            _renderer = new EssenceRenderer(GameController, Settings, _entityTracker, _prices, _values, _setup, _corruptionLog, icons, _inventoryScanner);
 
             var catalogueView = new CatalogueView(Settings, _prices, _values, _setup, _priceBridge, _entityTracker, _corruptionLog, icons,
-                () => _clock.ElapsedMilliseconds);
+                () => _clock.ElapsedMilliseconds, _inventoryScanner);
             var indicatorPreview = new IndicatorPreview(Settings, icons);
             var debugPreview = new DebugPreview(Settings, icons);
             _catalogueDraw = catalogueView.Draw;
@@ -121,6 +135,20 @@ namespace BetterEssenceCorruptionHelper
             // method in case it was reloaded.
             _prices?.Invalidate(reResolveProvider: true);
             _setup?.Invalidate();
+            _inventoryScanner?.Invalidate();
+
+            if (area?.IsPeaceful == false && Settings.VaalOrbAlert.EnableAlert.Value && Settings.Tracking.Strategy.Mode != Strategy.StrategyMode.NoCorruption)
+            {
+                _inventoryScanner?.Update(_clock.ElapsedMilliseconds);
+                if (_inventoryScanner?.VaalOrbCount == 0)
+                {
+                    DebugWindow.LogMsg($"[{Name}] WARNING: No Vaal Orbs in inventory! Essence corruption disabled.", 8, SharpDX.Color.OrangeRed);
+                }
+                else if (_inventoryScanner?.VaalOrbCount < Settings.VaalOrbAlert.MinVaalOrbs.Value)
+                {
+                    DebugWindow.LogMsg($"[{Name}] WARNING: Low Vaal Orbs ({_inventoryScanner.VaalOrbCount} left, minimum: {Settings.VaalOrbAlert.MinVaalOrbs.Value}).", 5, SharpDX.Color.Orange);
+                }
+            }
         }
 
         /// <summary>ExileCore entity events drive monolith discovery (see EssenceEntityTracker).</summary>
@@ -141,6 +169,7 @@ namespace BetterEssenceCorruptionHelper
             {
                 _prices?.Update();
                 _setup?.Update(_gatesAtMs);
+                _inventoryScanner?.Update(_gatesAtMs);
             }
 
             _entityTracker?.Tick(_gates.Track);

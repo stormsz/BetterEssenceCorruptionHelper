@@ -84,7 +84,7 @@ namespace BetterEssenceCorruptionHelper.Analysis
                 if (count < 2)
                     return -1;
 
-                return (count << 32) | (uint)(root!.GetChildAtIndex(1)?.ChildCount ?? 0);
+                return ((long)count << 32) | (uint)(root!.GetChildAtIndex(1)?.ChildCount ?? 0);
             }
             catch
             {

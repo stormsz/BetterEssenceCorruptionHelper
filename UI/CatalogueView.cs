@@ -27,7 +27,8 @@ namespace BetterEssenceCorruptionHelper.UI
         EssenceEntityTracker tracker,
         CorruptionLog corruptionLog,
         EssenceIcons icons,
-        Func<long> clockMs)
+        Func<long> clockMs,
+        InventoryScanner? inventory = null)
     {
         private static readonly Vector4 WarnColor = new(1f, 0.78f, 0.3f, 1f);
         private static readonly Vector4 GoodColor = new(0.45f, 0.9f, 0.45f, 1f);
@@ -88,6 +89,7 @@ namespace BetterEssenceCorruptionHelper.UI
         private readonly CorruptionLog _corruptionLog = corruptionLog;
         private readonly EssenceIcons _icons = icons;
         private readonly Func<long> _clockMs = clockMs;
+        private readonly InventoryScanner? _inventory = inventory;
 
         /// <summary>Corrupting a monster holding only this essence, valid for <see cref="_profitKey"/>.</summary>
         private readonly Dictionary<EssenceEntry, CorruptionAssessment?> _singleProfit = new();
@@ -274,6 +276,30 @@ namespace BetterEssenceCorruptionHelper.UI
             {
                 ImGui.SameLine(0, 10);
                 ImGui.TextDisabled($"·  Auto-refreshed {Format.Age(_clockMs() - sampled)} ago (every {PriceBook.RefreshIntervalMs / 1000}s · prices & planner recommendations)");
+            }
+
+            if (_inventory != null)
+            {
+                var vaalCount = _inventory.VaalOrbCount;
+                var minThreshold = _settings.VaalOrbAlert.MinVaalOrbs.Value;
+                var alert = _inventory.ShouldAlert(_settings);
+
+                var countColor = alert
+                    ? (vaalCount == 0 ? new Vector4(1f, 0.35f, 0.3f, 1f) : new Vector4(1f, 0.65f, 0.1f, 1f))
+                    : new Vector4(0.45f, 0.9f, 0.45f, 1f);
+
+                ImGui.TextColored(new Vector4(0.7f, 0.73f, 0.8f, 1f), "In inventory:");
+                ImGui.SameLine(0, 5);
+                ImGui.TextColored(countColor, $"{vaalCount} Vaal Orb{(vaalCount == 1 ? "" : "s")}");
+
+                if (alert)
+                {
+                    ImGui.SameLine(0, 8);
+                    var warnText = vaalCount == 0
+                        ? "None in inventory! Essence corruption disabled"
+                        : $"Low (below minimum {minThreshold})";
+                    ImGui.TextColored(countColor, warnText);
+                }
             }
         }
 
@@ -834,6 +860,15 @@ namespace BetterEssenceCorruptionHelper.UI
 
                 ImGui.TableNextRow();
                 ImGui.TableNextColumn();
+
+                var icon = entry != null ? (_icons.For(entry.Name) ?? _icons.For(entry.TypeName)) : _icons.For("Vaal");
+                if (icon is { } iconPtr)
+                {
+                    var iconSize = ImGui.GetTextLineHeight();
+                    ImGui.Image(iconPtr, new Vector2(iconSize, iconSize));
+                    ImGui.SameLine(0, 4);
+                }
+
                 ImGui.Text(item.Name);
                 ImGui.TableNextColumn();
                 ImGui.TextColored(mapping.Status == ItemMappingStatus.Verified ? GoodColor : WarnColor,
@@ -884,6 +919,8 @@ namespace BetterEssenceCorruptionHelper.UI
             if (!string.IsNullOrEmpty(np.FailureDetails))
                 sb.Append("ninja_price_failure_details\t").Append(np.FailureDetails).Append('\n');
             sb.Append("atlas_passives\t").Append(string.Join(", ", _setup.AtlasPassiveNames)).Append('\n');
+            if (_inventory != null)
+                sb.Append("inventory_vaal_orbs\t").Append(_inventory.VaalOrbCount).Append('\n');
             foreach (var (stat, value) in _setup.EssenceMapStats())
                 sb.Append(stat).Append('\t').Append(value).Append('\n');
             sb.Append("session_monsters_killed\t").Append(_corruptionLog.TotalKilled).Append('\n');

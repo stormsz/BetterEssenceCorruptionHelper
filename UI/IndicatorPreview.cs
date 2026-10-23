@@ -16,7 +16,6 @@ namespace BetterEssenceCorruptionHelper.UI
     {
         private readonly Settings _settings = settings;
         private readonly EssenceIcons _icons = icons;
-        private int _previewMode = 2; // 0 = Corrupt-Me, 1 = Kill-Ready, 2 = Side-by-Side (default)
 
         public void Draw()
         {
@@ -26,12 +25,6 @@ namespace BetterEssenceCorruptionHelper.UI
 
             ImGui.AlignTextToFramePadding();
             ImGui.TextDisabled("LIVE OVERLAY PREVIEW");
-            ImGui.SameLine(0, 16);
-            ImGui.RadioButton("Side-by-Side##indicatorPreview", ref _previewMode, 2);
-            ImGui.SameLine();
-            ImGui.RadioButton("Corrupt-Me##indicatorPreview", ref _previewMode, 0);
-            ImGui.SameLine();
-            ImGui.RadioButton("Kill-Ready##indicatorPreview", ref _previewMode, 1);
 
             if (!_settings.Indicators.EnableAllIndicators.Value)
             {
@@ -41,47 +34,39 @@ namespace BetterEssenceCorruptionHelper.UI
 
             ImGui.Spacing();
 
-            // Preview canvas child window
+            // Preview canvas child window - rendered side-by-side (or stacked on narrow windows)
             var availWidth = ImGui.GetContentRegionAvail().X;
-            var isStacked = _previewMode == 2 && availWidth < 620f;
-            var canvasHeight = isStacked ? 380f : 240f;
+            var isStacked = availWidth < (PreviewCanvas.LabelWidth * 2f + 40f);
+            var canvasHeight = isStacked ? 360f : 230f;
 
             if (PreviewCanvas.Begin("##indicatorPreviewCanvas", canvasHeight, out var drawList, out var canvasMin, out _))
-                DrawScene(drawList, canvasMin, availWidth);
+                DrawScene(drawList, canvasMin, availWidth, isStacked);
             PreviewCanvas.End();
         }
 
-        private void DrawScene(ImDrawListPtr drawList, Vector2 canvasMin, float availWidth)
+        private void DrawScene(ImDrawListPtr drawList, Vector2 canvasMin, float availWidth, bool isStacked)
         {
-            var labelY = canvasMin.Y + 98f; // Leaves comfortable headroom above label for CORRUPT & profit badges
+            const float labelWidth = PreviewCanvas.LabelWidth;
+            const float labelHeight = PreviewCanvas.LabelHeight;
+            const float labelYOffset = 76f; // Leaves headroom above label for status & value badges
+            var labelY = canvasMin.Y + labelYOffset;
 
-            if (_previewMode == 2 && availWidth >= 620f)
+            if (!isStacked)
             {
-                // Wide Side-by-Side
-                var leftCenterX = canvasMin.X + availWidth * 0.28f;
-                var rightCenterX = canvasMin.X + availWidth * 0.72f;
+                // Wide Side-by-Side: distribute evenly with equal margins
+                var spacing = (availWidth - 2f * labelWidth) / 3f;
+                var leftCenterX = canvasMin.X + spacing + labelWidth / 2f;
+                var rightCenterX = canvasMin.X + spacing * 2f + labelWidth * 1.5f;
 
                 DrawSimulatedMonolith(drawList, leftCenterX, labelY, isCorruptTarget: true);
                 DrawSimulatedMonolith(drawList, rightCenterX, labelY, isCorruptTarget: false);
             }
-            else if (_previewMode == 2 && availWidth < 620f)
+            else
             {
                 // Narrow Side-by-Side: Stack them vertically so both remain visible
                 var centerX = canvasMin.X + availWidth * 0.5f;
                 DrawSimulatedMonolith(drawList, centerX, labelY, isCorruptTarget: true);
-                DrawSimulatedMonolith(drawList, centerX, labelY + 145f, isCorruptTarget: false);
-            }
-            else if (_previewMode == 1)
-            {
-                // Kill Ready centered
-                var centerX = canvasMin.X + availWidth * 0.5f;
-                DrawSimulatedMonolith(drawList, centerX, labelY, isCorruptTarget: false);
-            }
-            else
-            {
-                // Corrupt Target centered (default)
-                var centerX = canvasMin.X + availWidth * 0.5f;
-                DrawSimulatedMonolith(drawList, centerX, labelY, isCorruptTarget: true);
+                DrawSimulatedMonolith(drawList, centerX, labelY + labelHeight + 55f, isCorruptTarget: false);
             }
         }
 
@@ -93,8 +78,10 @@ namespace BetterEssenceCorruptionHelper.UI
             var labelMin = new Vector2(centerX - labelWidth / 2f, labelY);
             var labelMax = new Vector2(centerX + labelWidth / 2f, labelY + labelHeight);
 
-            // 1. Draw simulated in-game ground label
-            PreviewCanvas.DrawGroundLabel(drawList, _icons, labelMin, labelMax, isCorruptTarget ? PreviewCanvas.CorruptSample : PreviewCanvas.KillSample);
+            // 1. Draw simulated in-game ground label (with simulated Vaal button on corrupt target)
+            PreviewCanvas.DrawGroundLabel(drawList, _icons, labelMin, labelMax,
+                isCorruptTarget ? PreviewCanvas.CorruptSample : PreviewCanvas.KillSample,
+                drawVaalButton: isCorruptTarget);
 
             // 2. If master toggle is disabled, do not draw overlay
             if (!_settings.Indicators.EnableAllIndicators.Value)
@@ -108,8 +95,11 @@ namespace BetterEssenceCorruptionHelper.UI
             if (!indicator.ShowIndicator.Value)
                 return;
 
+            var corruptMe = _settings.Indicators.CorruptMe;
+            var highlightButton = isCorruptTarget && corruptMe.HighlightVaalButton.Value;
             var showValue = _settings.Indicators.ShowValueRange.Value;
-            if (!indicator.DrawBorder.Value && !indicator.DrawText.Value && !showValue)
+
+            if (!indicator.DrawBorder.Value && !indicator.DrawText.Value && !highlightButton && !showValue)
                 return;
 
             var insetX = _settings.Indicators.BoxInsetX.Value;
@@ -121,19 +111,38 @@ namespace BetterEssenceCorruptionHelper.UI
                 labelWidth - insetX * 2,
                 labelHeight - insetY * 2);
 
-            // Box / Fill
+            // Box / Fill on Card
             if (indicator.DrawBorder.Value)
                 DrawStatusBox(drawList, drawRect, indicator);
 
-            // Status Text (CORRUPT or KILL)
+            // Vaal Button Highlight
+            if (highlightButton)
+            {
+                var buttonRect = PreviewCanvas.GetSimulatedVaalButtonRect(labelMin, labelMax);
+                DrawVaalButtonHighlight(drawList, buttonRect, corruptMe);
+            }
+
+            // Status Indicator (Vaal Icon or Text)
+            var drewStatus = false;
             if (indicator.DrawText.Value)
-                DrawStatusText(drawList, drawRect, indicator, isCorruptTarget);
+            {
+                if (isCorruptTarget && corruptMe.ShowVaalIcon.Value && _icons?.For("Vaal") is { } vaalIcon)
+                {
+                    DrawStatusVaalIcon(drawList, drawRect, vaalIcon, corruptMe.BorderColor.Value);
+                    drewStatus = true;
+                }
+                else
+                {
+                    DrawStatusText(drawList, drawRect, indicator, isCorruptTarget);
+                    drewStatus = true;
+                }
+            }
 
             // Value Text (+15.2c expected)
             if (showValue && isCorruptTarget)
             {
                 var valueText = "+15.2c expected";
-                DrawValueText(drawList, drawRect, valueText, Color.LimeGreen, indicator.DrawText.Value);
+                DrawValueText(drawList, drawRect, valueText, Color.LimeGreen, drewStatus, corruptMe.ShowVaalIcon.Value);
             }
         }
 
@@ -160,6 +169,45 @@ namespace BetterEssenceCorruptionHelper.UI
             drawList.AddRect(min, max, ImGui.GetColorU32(borderColor), 0.0f, ImDrawFlags.None, 2.0f);
         }
 
+        private static void DrawVaalButtonHighlight(ImDrawListPtr drawList, RectangleF buttonRect, CorruptMeSettings corruptMe)
+        {
+            var min = new Vector2(buttonRect.Left, buttonRect.Top);
+            var max = new Vector2(buttonRect.Right, buttonRect.Bottom);
+
+            if (corruptMe.BackgroundFill.Value)
+            {
+                var baseColor = corruptMe.BorderColor.Value;
+                var fillColor = EssenceRenderer.ToImguiVec4(new Color(
+                    baseColor.R,
+                    baseColor.G,
+                    baseColor.B,
+                    (byte)(corruptMe.BackgroundOpacity.Value * 255)));
+                drawList.AddRectFilled(min, max, ImGui.GetColorU32(fillColor), 4f);
+            }
+
+            var borderColor = EssenceRenderer.ToImguiVec4(corruptMe.BorderColor.Value);
+            drawList.AddRect(min, max, ImGui.GetColorU32(borderColor), 4f, ImDrawFlags.None, 2.5f);
+        }
+
+        private static void DrawStatusVaalIcon(ImDrawListPtr drawList, RectangleF rect, nint vaalIcon, Color borderColor)
+        {
+            var iconSize = new Vector2(24f, 24f);
+            var center = new Vector2(rect.Center.X, rect.Top - 22f);
+
+            var bgMin = new Vector2(center.X - iconSize.X / 2f - 4f, center.Y - iconSize.Y / 2f - 3f);
+            var bgMax = new Vector2(center.X + iconSize.X / 2f + 4f, center.Y + iconSize.Y / 2f + 3f);
+
+            var bgColor = new Vector4(0f, 0f, 0f, 200f / 255f);
+            var borderVec = EssenceRenderer.ToImguiVec4(borderColor);
+
+            drawList.AddRectFilled(bgMin, bgMax, ImGui.GetColorU32(bgColor), 4f);
+            drawList.AddRect(bgMin, bgMax, ImGui.GetColorU32(borderVec), 4f, ImDrawFlags.None, 1.2f);
+
+            var iconMin = new Vector2(center.X - iconSize.X / 2f, center.Y - iconSize.Y / 2f);
+            var iconMax = new Vector2(center.X + iconSize.X / 2f, center.Y + iconSize.Y / 2f);
+            drawList.AddImage(vaalIcon, iconMin, iconMax);
+        }
+
         private static void DrawStatusText(ImDrawListPtr drawList, RectangleF rect, IIndicatorSettings indicator, bool isCorruptTarget)
         {
             var text = isCorruptTarget ? "CORRUPT" : "KILL";
@@ -167,10 +215,10 @@ namespace BetterEssenceCorruptionHelper.UI
             DrawCenteredTextWithBackground(drawList, textPos, text, EssenceRenderer.ToImguiVec4(indicator.TextColor.Value));
         }
 
-        private static void DrawValueText(ImDrawListPtr drawList, RectangleF rect, string text, Color color, bool belowStatusText)
+        private static void DrawValueText(ImDrawListPtr drawList, RectangleF rect, string text, Color color, bool belowStatusIndicator, bool isVaalIcon = false)
         {
-            var lineHeight = ImGui.GetTextLineHeight() + 12;
-            var y = rect.Top - 25 - (belowStatusText ? lineHeight : 0);
+            var spacing = isVaalIcon ? 34f : ImGui.GetTextLineHeight() + 12f;
+            var y = rect.Top - 25f - (belowStatusIndicator ? spacing : 0f);
             DrawCenteredTextWithBackground(drawList, new Vector2(rect.Center.X, y), text, EssenceRenderer.ToImguiVec4(color));
         }
 

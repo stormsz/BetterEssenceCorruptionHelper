@@ -14,6 +14,7 @@ namespace BetterEssenceCorruptionHelper
             Enable = new ToggleNode(true);
             CatalogueView = new CustomNode();
             Indicators = new IndicatorSettings();
+            VaalOrbAlert = new VaalOrbAlertSettings();
             MapStats = new MapStatsSettings();
             Debug = new DebugSettings();
             Tracking = new TrackingPreferences();
@@ -29,7 +30,10 @@ namespace BetterEssenceCorruptionHelper
         [Menu("Essence Indicators", 50, CollapsedByDefault = true)]
         public IndicatorSettings Indicators { get; set; }
 
-        [Menu("Essence Map Stats", 100, CollapsedByDefault = false)]
+        [Menu("Vaal Orb Alert", 75, CollapsedByDefault = true)]
+        public VaalOrbAlertSettings VaalOrbAlert { get; set; }
+
+        [Menu("Essence Map Stats", 100, CollapsedByDefault = true)]
         public MapStatsSettings MapStats { get; set; }
 
         /// <summary>
@@ -100,11 +104,17 @@ namespace BetterEssenceCorruptionHelper
         [Menu("Enable Corrupt-Me Indicator", "Display indicator for essences that should be corrupted")]
         public ToggleNode ShowCorruptMe { get; set; } = new ToggleNode(true);
 
-        [Menu("Draw Border", "Draw border around corrupt-me essences")]
+        [Menu("Highlight Card Border", "Draw border around corrupt-me monolith card")]
         public ToggleNode DrawBorder { get; set; } = new ToggleNode(true);
 
-        [Menu("Draw Text", "Show 'CORRUPT' text above corrupt-me essences")]
+        [Menu("Highlight Vaal Button", "Highlight the corrupt interaction button at the bottom center of the monolith label")]
+        public ToggleNode HighlightVaalButton { get; set; } = new ToggleNode(true);
+
+        [Menu("Show Status Indicator", "Show indicator above corrupt-me essences")]
         public ToggleNode DrawText { get; set; } = new ToggleNode(true);
+
+        [Menu("Use Vaal Icon", "Show Vaal Orb icon instead of 'CORRUPT' text above the label")]
+        public ToggleNode ShowVaalIcon { get; set; } = new ToggleNode(false);
 
         [Menu("Background Fill", "Fill the status box with background color")]
         public ToggleNode BackgroundFill { get; set; } = new ToggleNode(false);
@@ -152,7 +162,24 @@ namespace BetterEssenceCorruptionHelper
         public ColorNode TextColor { get; set; } = new ColorNode(Color.Green);
     }
 
-    [Submenu(CollapsedByDefault = false)]
+    [Submenu(CollapsedByDefault = true)]
+    public class VaalOrbAlertSettings
+    {
+        [Menu("Enable Vaal Orb Alert", "Scans player inventory for Vaal Orbs and alerts when below threshold")]
+        public ToggleNode EnableAlert { get; set; } = new ToggleNode(true);
+
+        [Menu("Alert Threshold (Min Vaal Orbs)", "Alert when inventory has fewer than this amount of Vaal Orbs")]
+        public RangeNode<int> MinVaalOrbs { get; set; } = new RangeNode<int>(5, 1, 50);
+
+        [Menu("Show HUD Warning Banner", "Display an on-screen warning banner at the top of the screen in maps when below threshold")]
+        public ToggleNode ShowWarningBanner { get; set; } = new ToggleNode(true);
+
+        [Menu("Warn on Essence Label", "Show 'NO VAAL ORBS' indicator on corrupt-me monoliths when inventory is empty")]
+        public ToggleNode WarnOnLabel { get; set; } = new ToggleNode(true);
+    }
+
+
+    [Submenu(CollapsedByDefault = true)]
     public class MapStatsSettings
     {
         [Menu("Show Map Stats Window", "Display essence map statistics window")]
@@ -165,19 +192,19 @@ namespace BetterEssenceCorruptionHelper
         public ToggleNode RecordOutcomesCsv { get; set; } = new ToggleNode(false);
 
         [Menu("Title Background", "Background color for window title")]
-        public ColorNode TitleBackground { get; set; } = new ColorNode(new Color(0, 157, 255, 200));
+        public ColorNode TitleBackground { get; set; } = new ColorNode(new Color(24, 26, 33, 240));
 
         [Menu("Content Background", "Background color for window content")]
-        public ColorNode ContentBackground { get; set; } = new ColorNode(new Color(0, 0, 0, 150));
+        public ColorNode ContentBackground { get; set; } = new ColorNode(new Color(14, 16, 20, 230));
 
         [Menu("Title Color", "Text color for window title")]
-        public ColorNode TitleColor { get; set; } = new ColorNode(Color.White);
+        public ColorNode TitleColor { get; set; } = new ColorNode(new Color(230, 215, 175));
 
         [Menu("Text Color", "Text color for window content")]
-        public ColorNode TextColor { get; set; } = new ColorNode(Color.White);
+        public ColorNode TextColor { get; set; } = new ColorNode(new Color(225, 228, 235));
 
         [Menu("Border Color", "Border color for window")]
-        public ColorNode BorderColor { get; set; } = new ColorNode(new Color(100, 100, 100, 200));
+        public ColorNode BorderColor { get; set; } = new ColorNode(new Color(60, 64, 75, 200));
     }
 
 

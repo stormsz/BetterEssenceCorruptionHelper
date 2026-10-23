@@ -915,6 +915,7 @@ namespace BetterEssenceCorruptionHelper
         /// </summary>
         private void ProcessMonsters(long now, bool diagnostics)
         {
+            PruneStaleMonsterChecks(now);
             _seekingTrapped.Clear();
             _seekingFreed.Clear();
             _bestCandidates.Clear();
@@ -1379,6 +1380,36 @@ namespace BetterEssenceCorruptionHelper
 
             _imprisonedChecks[monster.Id] = (imprisoned, now);
             return imprisoned;
+        }
+
+        /// <summary>Evicts stale check cache entries to prevent unbounded memory growth in dense maps.</summary>
+        private void PruneStaleMonsterChecks(long now)
+        {
+            if (_imprisonedChecks.Count > 150)
+            {
+                var threshold = now - (IMPRISONED_CHECK_TTL_MS * 2);
+                var stale = new List<uint>();
+                foreach (var (id, entry) in _imprisonedChecks)
+                {
+                    if (entry.CheckedAtMs < threshold)
+                        stale.Add(id);
+                }
+                foreach (var id in stale)
+                    _imprisonedChecks.Remove(id);
+            }
+
+            if (_modsChecks.Count > 150)
+            {
+                var threshold = now - (IMPRISONED_CHECK_TTL_MS * 2);
+                var stale = new List<uint>();
+                foreach (var (id, entry) in _modsChecks)
+                {
+                    if (entry.CheckedAtMs < threshold)
+                        stale.Add(id);
+                }
+                foreach (var id in stale)
+                    _modsChecks.Remove(id);
+            }
         }
 
         /// <summary>Monster rarity as a rank (White 0 .. Unique 3), or -1 if unreadable.</summary>
