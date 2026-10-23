@@ -1,8 +1,8 @@
 ﻿namespace BetterEssenceCorruptionHelper.Models
 {
     /// <summary>
-    /// Statistics tracker for essence corruption decisions, scoped to one map instance.
-    /// Only touched from the main runner and Render, which share a thread, so no locking.
+    /// Statistics tracker for essence corruption decisions, scoped to one map instance (one per
+    /// <see cref="MapSession"/>). Only touched from Tick and Render, which share a thread, so no locking.
     ///
     /// Tracks:
     /// - TotalKilled: All essences player interacted with
@@ -34,14 +34,5 @@
         public void IncrementMissed() { TotalMissed++; Version++; }
 
         public void IncrementMistakes() { TotalMistakes++; Version++; }
-
-        public void Reset()
-        {
-            TotalKilled = 0;
-            TotalCorrupted = 0;
-            TotalMissed = 0;
-            TotalMistakes = 0;
-            Version++;
-        }
     }
 }

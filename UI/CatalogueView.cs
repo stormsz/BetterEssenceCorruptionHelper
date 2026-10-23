@@ -913,8 +913,8 @@ namespace BetterEssenceCorruptionHelper.UI
             var last = perf.Last;
             return string.Join("\n",
                 $"Tracker, last second: {last.Ticks} ticks, {last.AvgTickMicros:0} us avg, {last.MaxTickMicros:0} us max per tick",
-                $"Entities visited: {last.EntityVisits}/s ({last.MonolithChecks} monolith, {last.MonsterVisits} monster, {last.SeedVisits} reseed). " +
-                $"Old design: {perf.EntityListSize} x 20 = {perf.EntityListSize * 20}/s",
+                $"Entities visited: {last.EntityVisits}/s ({last.MonolithChecks} monolith, {last.MonsterVisits} monster, {last.SeedVisits} reseed), " +
+                $"entity list size {perf.EntityListSize}",
                 $"Label list scans: {last.LabelScans}/s ({last.LabelsVisited} labels read), label analyses: {last.Analyses}/s",
                 $"Monoliths loaded: {last.CandidateMonoliths}, essences tracked: {last.Tracked}. " +
                 $"Price sample: {_prices.LastSampleDurationTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:0.00} ms") + "\n";

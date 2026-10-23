@@ -5,11 +5,8 @@ using ExileCore.PoEMemory.MemoryObjects;
 namespace BetterEssenceCorruptionHelper
 {
     /// <summary>
-    /// Shared "should we be doing anything right now?" checks.
-    ///
-    /// These were previously duplicated verbatim in both EssenceEntityTracker and
-    /// EssenceRenderer, which meant the two could silently drift apart - the tracker could stop
-    /// updating essences while the renderer kept drawing the stale results, or vice versa.
+    /// Shared "should we be doing anything right now?" checks, evaluated once per frame by the
+    /// plugin so the tracker and the renderer can't drift apart.
     /// </summary>
     internal static class GameStateGates
     {
@@ -33,7 +30,7 @@ namespace BetterEssenceCorruptionHelper
         /// True when a full-screen game panel is covering the play area, so overlays would either
         /// be hidden behind it or drawn on top of it.
         /// </summary>
-        public static bool IsAnyBlockingUiVisible(GameController gameController)
+        private static bool IsAnyBlockingUiVisible(GameController gameController)
         {
             var ui = gameController.IngameState.IngameUi;
             foreach (var (_, get) in BlockingPanels)
@@ -70,9 +67,9 @@ namespace BetterEssenceCorruptionHelper
         }
 
         /// <summary>
-        /// Both gates at once, reading the blocking panels a single time. The plugin evaluates this
-        /// once per frame in Tick and Render reuses the result, instead of each caller re-reading
-        /// eleven UI elements.
+        /// Both gates, reading the blocking panels a single time. Track: work that only makes sense in
+        /// a live, non-town area (entity scanning, label resolution). Render: drawing, deliberately
+        /// without the town check - the map-stats window has its own "show in town/hideout" setting.
         /// </summary>
         public static (bool Track, bool Render) Evaluate(GameController gameController, Settings settings)
         {
@@ -82,24 +79,5 @@ namespace BetterEssenceCorruptionHelper
             var render = !IsAnyBlockingUiVisible(gameController);
             return (render && !gameController.Area.CurrentArea.IsPeaceful, render);
         }
-
-        /// <summary>
-        /// Gate for work that only makes sense in a live, non-town area - entity scanning and
-        /// label resolution.
-        /// </summary>
-        public static bool ShouldTrackEssences(GameController gameController, Settings settings) =>
-            settings.Enable.Value &&
-            gameController.InGame &&
-            !gameController.Area.CurrentArea.IsPeaceful &&
-            !IsAnyBlockingUiVisible(gameController);
-
-        /// <summary>
-        /// Gate for drawing. Deliberately does not check IsPeaceful: the map-stats window has its
-        /// own "show in town/hideout" setting and is allowed to render there.
-        /// </summary>
-        public static bool ShouldRender(GameController gameController, Settings settings) =>
-            settings.Enable.Value &&
-            gameController.InGame &&
-            !IsAnyBlockingUiVisible(gameController);
     }
 }

@@ -15,7 +15,6 @@ namespace BetterEssenceCorruptionHelper
     {
         #region Fields
 
-        private readonly MapStatistics _mapStats = new();
         private readonly CorruptionLog _corruptionLog = new();
         private readonly Stopwatch _clock = Stopwatch.StartNew();
         private EssenceEntityTracker? _entityTracker;
@@ -28,9 +27,6 @@ namespace BetterEssenceCorruptionHelper
         private Action? _diagnosticsDraw;
         private Action? _indicatorPreviewDraw;
         private Action? _debugPreviewDraw;
-
-        /// <summary>Hash of the map instance the current stats belong to (0 = none yet)</summary>
-        private uint _statsMapHash;
 
         /// <summary>This frame's gates, evaluated once in Tick and reused by Render.</summary>
         private (bool Track, bool Render) _gates;
@@ -57,8 +53,8 @@ namespace BetterEssenceCorruptionHelper
             _setup = new SetupDetector(GameController);
 
             var icons = new EssenceIcons(Graphics, Path.Join(ConfigDirectory, "icons"));
-            _entityTracker = new EssenceEntityTracker(GameController, Settings, _mapStats, _corruptionLog, _prices, _values, _setup, OutcomeCsvPath);
-            _renderer = new EssenceRenderer(GameController, Settings, _mapStats, _entityTracker, _prices, _values, _setup, _corruptionLog, icons);
+            _entityTracker = new EssenceEntityTracker(GameController, Settings, _corruptionLog, _prices, _values, _setup, OutcomeCsvPath);
+            _renderer = new EssenceRenderer(GameController, Settings, _entityTracker, _prices, _values, _setup, _corruptionLog, icons);
 
             var catalogueView = new CatalogueView(Settings, _prices, _values, _setup, _priceBridge, _entityTracker, _corruptionLog, icons,
                 () => _clock.ElapsedMilliseconds);
@@ -115,17 +111,10 @@ namespace BetterEssenceCorruptionHelper
         /// <param name="area">The new area instance object</param>
         public override void AreaChange(AreaInstance area)
         {
-            // Map stats belong to one map instance. Town/hideout trips keep them (so they can still
-            // be shown there), and coming back through a portal lands in the same instance hash.
-            // Only entering a different non-peaceful instance starts a fresh tally.
-            var newMap = !area.IsPeaceful && area.Hash != _statsMapHash;
-            if (newMap)
-            {
-                _statsMapHash = area.Hash;
-                _mapStats.Reset();
-            }
-
-            _entityTracker?.ResetState(newMap);
+            // Essences and map stats are kept per map instance by the tracker: town/hideout trips keep
+            // the last map's (so they can still be shown there), and coming back through a portal lands
+            // in the same instance hash and resumes it.
+            _entityTracker?.OnAreaChanged(area);
             _renderer?.Reset();
 
             // Ninja Price re-syncs its league on area change; sample again and re-resolve its bridge

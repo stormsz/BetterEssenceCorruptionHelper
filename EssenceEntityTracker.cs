@@ -16,33 +16,37 @@ namespace BetterEssenceCorruptionHelper
 {
     /// <summary>
     /// Handles entity tracking and processing for essence monoliths.
-    /// Manages the lifecycle of essence entities from detection to opening.
+    /// Manages the lifecycle of essence entities from detection to the death of their monster.
     /// </summary>
     /// <remarks>
     /// <para>
     /// Update path, all on the main thread:
     /// <list type="number">
     /// <item>Discovery is event driven. <see cref="OnEntityAdded"/>/<see cref="OnEntityRemoved"/> keep the
-    /// set of loaded monolith entities, so the tracker never walks the whole entity list per pass
-    /// (earlier versions iterated every entity 20 times a second, even in maps without essences). A
-    /// one-off seed scan covers entities that existed before the plugin was enabled or before the area
-    /// change was seen, and a reseed once a second (1/20 of the old scan rate) guards against a missed event.</item>
-    /// <item><see cref="Tick"/> runs every frame: monolith state (opened?) for the handful of
-    /// monoliths, label resolution only while a tracked essence needs one, label analysis only when
-    /// its line count changed (a Vaal Orb adds the "Corrupted" line) or at the old 50ms cadence, and
-    /// the recommendation right after. So a corruption shows up on the next frame instead of the next
-    /// 50ms scan.</item>
-    /// <item>The monster pass (linking the trapped monster, counting its kill) walks monsters only, at the
-    /// old 50ms cadence, and only while a monolith still needs a monster linked or watched.</item>
+    /// set of loaded monolith entities and the references to linked monsters, so the tracker never
+    /// walks the whole entity list per pass. A seed scan covers entities that existed before the plugin
+    /// was enabled or the area change was seen, and a reseed once a second guards against a missed event.</item>
+    /// <item><see cref="Tick"/> runs every frame: monolith state (opened?) for unopened monoliths, label
+    /// resolution only while a tracked essence needs one, label analysis when its line count changed
+    /// (a Vaal Orb adds the "Corrupted" line) plus a periodic re-read, and the recommendation right after.</item>
+    /// <item>The monster pass (every <see cref="MONSTER_PASS_MS"/>) reads linked monsters directly and only
+    /// walks the monster list while an essence still needs its monster found.</item>
     /// </list>
     /// </para>
     /// <para>
-    /// Initializes a new instance of the EssenceEntityTracker class.
+    /// Essences are kept per map instance (<see cref="MapSession"/>): entity IDs are stable within an
+    /// instance, so an essence that the game unloads when you walk away, or that you come back to through
+    /// a portal, is recognised as the same one.
+    /// </para>
+    /// <para>
+    /// A kill is only counted for the essence monster itself, once it has been seen free and then dies.
+    /// Breaking the monolith can replace the trapped entity with a new one, so the trapped entity going
+    /// away (or reading dead) on release is not a kill: the freed monster is found again next to the
+    /// monolith by its metadata path and rarity, and that one is watched.
     /// </para>
     /// </remarks>
     /// <param name="gameController">The game controller instance</param>
     /// <param name="settings">Plugin settings</param>
-    /// <param name="mapStats">Statistics tracker</param>
     /// <param name="corruptionLog">Observed corruption outcomes</param>
     /// <param name="prices">Price snapshot (Vaal Orb cost of observed corruptions)</param>
     /// <param name="values">Essence values used to value observed corruptions</param>
@@ -51,7 +55,6 @@ namespace BetterEssenceCorruptionHelper
     internal class EssenceEntityTracker(
         GameController gameController,
         Settings settings,
-        MapStatistics mapStats,
         CorruptionLog corruptionLog,
         PriceBook prices,
         EssenceValues values,
@@ -60,19 +63,19 @@ namespace BetterEssenceCorruptionHelper
     {
         #region Constants
 
-        /// <summary>Interval of the monster pass (trapped-monster linking and kill detection), ms - the old scan rate</summary>
+        /// <summary>Interval of the monster pass (monster linking and kill detection), ms</summary>
         private const int MONSTER_PASS_MS = 50;
 
-        /// <summary>Re-read a label's text at least this often even if its line count didn't change, ms - the old scan rate</summary>
-        private const int ANALYSIS_REFRESH_MS = 50;
+        /// <summary>Re-read a label's text at least this often even if its line count didn't change, ms</summary>
+        private const int ANALYSIS_REFRESH_MS = 200;
 
-        /// <summary>Minimum gap between visible-label list scans while a tracked essence is missing its label, ms (~2 frames, as before)</summary>
+        /// <summary>Minimum gap between visible-label list scans while a tracked essence is missing its label, ms (~2 frames)</summary>
         private const int LABEL_SCAN_MIN_MS = 33;
 
         /// <summary>Safety re-scan of the label list while every tracked essence has a visible label, ms</summary>
         private const int LABEL_SCAN_SAFETY_MS = 250;
 
-        /// <summary>Safety re-seed of monolith candidates from the full entity list, ms (1/20 of the old scan rate)</summary>
+        /// <summary>Safety re-seed of monoliths and linked monsters from the full entity list, ms</summary>
         private const int RESEED_MS = 1000;
 
         /// <summary>Screen margin (px) within which a monolith's ground label may be visible</summary>
@@ -81,20 +84,41 @@ namespace BetterEssenceCorruptionHelper
         /// <summary>The same tracking error is logged at most this often, ms</summary>
         private const int ERROR_LOG_INTERVAL_MS = 5000;
 
+        /// <summary>A monolith must read untargetable this long before it counts as opened, ms (filters a misread on load)</summary>
+        private const int OPEN_CONFIRM_MS = 150;
+
         /// <summary>Max grid distance between a monolith and the trapped monster linked to it</summary>
         private const float MONSTER_LINK_RADIUS = 15f;
 
+        /// <summary>Max grid distance between a monolith and the freed monster linked to it after release</summary>
+        private const float FREED_LINK_RADIUS = 30f;
+
+        /// <summary>How long after release the freed monster is looked for next to the monolith, ms</summary>
+        private const int FREED_LINK_WINDOW_MS = 10000;
+
         /// <summary>
-        /// How long a released monster must be missing from the entity list before it counts as
-        /// gone - the list can drop an entity for a pass or two while it is rebuilt.
+        /// For this long after release only a monster of the trapped one's kind (same metadata path) is
+        /// linked as the freed monster; after it, any rare next to the monolith will do. ms
+        /// </summary>
+        private const int FREED_PATH_ONLY_MS = 1000;
+
+        /// <summary>
+        /// How long a freed monster must be missing from the entity list before its disappearance is
+        /// judged - the list can drop an entity for a pass or two while it is rebuilt.
         /// </summary>
         private const int MONSTER_VANISH_GRACE_MS = 1000;
 
         /// <summary>
-        /// A released monster that vanishes this close to the player (grid units) died and left no
-        /// corpse; one that vanishes further away most likely just left the loaded area.
+        /// A damaged freed monster that vanishes this close to the player (grid units) died and left no
+        /// corpse (e.g. shattered); one that vanishes further away most likely just left the loaded area.
         /// </summary>
         private const float MONSTER_VANISH_KILL_DISTANCE = 60f;
+
+        /// <summary>How long a MonsterInsideMonolith read is trusted before it is read again (ms).</summary>
+        private const int IMPRISONED_CHECK_TTL_MS = 1000;
+
+        /// <summary>Map instances whose essences are remembered (a map device opens up to 6 portals)</summary>
+        private const int MAX_MAP_SESSIONS = 8;
 
         /// <summary>Diagnostics summaries are written at most this often, ms</summary>
         private const int DIAGNOSTIC_SUMMARY_MS = 1000;
@@ -105,68 +129,59 @@ namespace BetterEssenceCorruptionHelper
 
         private readonly GameController _gameController = gameController;
         private readonly Settings _settings = settings;
-        private readonly MapStatistics _mapStats = mapStats;
         private readonly CorruptionLog _corruptionLog = corruptionLog;
         private readonly PriceBook _prices = prices;
         private readonly EssenceValues _values = values;
         private readonly SetupDetector _setup = setup;
         private readonly Func<string?> _outcomeCsvPath = outcomeCsvPath;
 
+        /// <summary>Recently visited map instances by area hash.</summary>
+        private readonly Dictionary<uint, MapSession> _sessions = new();
+
         /// <summary>
-        /// Every essence monolith seen in the current area, keyed by game entity ID.
+        /// The map being tracked. Town and hideout keep the last map's session, so its stats can still
+        /// be shown there; AreaHash 0 until the first map is bound.
         ///
-        /// The ID is what ExileCore itself keys entities by, and it survives an essence leaving and
-        /// re-entering the loaded area, so entries are simply kept until the area changes - no
-        /// address relinking or "was it killed or unloaded?" guesswork.
-        ///
-        /// A plain Dictionary is enough: Tick, Render and the entity events all run on the main thread.
+        /// Plain Dictionaries are enough everywhere: Tick, Render and the entity events all run on the main thread.
         /// </summary>
-        private readonly Dictionary<uint, EssenceEntityData> _trackedEntities = new();
+        private MapSession _session = new(0);
+
+        /// <summary>False in town/hideout: entity events there must not touch the last map's session.</summary>
+        private bool _inMap = true;
 
         /// <summary>Loaded entities carrying a Monolith component, by ID (EntityAdded/EntityRemoved + seeding).</summary>
         private readonly Dictionary<uint, Entity> _monoliths = new();
 
-        /// <summary>Display number counter. Survives hideout trips; restarts with each new map.</summary>
-        private int _entityIdCounter;
-
         /// <summary>Visible monolith labels by entity ID, rebuilt on every label scan (reused to avoid allocating).</summary>
         private readonly Dictionary<uint, LabelOnGround> _labelsById = new();
 
-        /// <summary>Tracked essences by the entity ID of their linked trapped monster.</summary>
-        private readonly Dictionary<uint, EssenceEntityData> _byMonsterId = new();
+        /// <summary>Unreleased essences still looking for their trapped monster (rebuilt each pass).</summary>
+        private readonly List<EssenceEntityData> _seekingTrapped = new();
 
-        /// <summary>Unreleased essences whose trapped monster can still be (re)linked (rebuilt each pass).</summary>
-        private readonly List<EssenceEntityData> _unreleased = new();
+        /// <summary>Released essences still looking for their freed monster (rebuilt each pass).</summary>
+        private readonly List<EssenceEntityData> _seekingFreed = new();
 
-        /// <summary>Best imprisoned monster seen this pass for each unreleased essence, by essence entity ID.</summary>
+        /// <summary>Best monster seen this pass for each essence that is looking for one, by essence entity ID.</summary>
         private readonly Dictionary<uint, MonsterCandidate> _bestCandidates = new();
 
         /// <summary>Cached MonsterInsideMonolith reads by monster ID, so stats aren't re-read every pass.</summary>
         private readonly Dictionary<uint, (bool Imprisoned, long CheckedAtMs)> _imprisonedChecks = new();
 
-        /// <summary>How long a MonsterInsideMonolith read is trusted before it is read again (ms).</summary>
-        private const int IMPRISONED_CHECK_TTL_MS = 1000;
+        /// <summary>Trapped entities left behind when their monolith opened; never linked as the freed monster.</summary>
+        private readonly HashSet<uint> _leftoverMonsters = new();
 
         /// <summary>
-        /// An imprisoned monster standing on an unreleased monolith. A monolith can hold a whole pack -
-        /// the essence monster plus its adds - so the candidates are ranked: highest rarity first (the
-        /// essence monster is rare, its adds are white), then closest to the monolith (it stands right
-        /// on it, the adds around it).
+        /// A monster that may be an essence's monster. Ranked: same metadata path as the trapped monster
+        /// first (after release), then highest rarity (the essence monster is rare, the pack around it
+        /// white or magic), then closest to the monolith.
         /// </summary>
-        private readonly record struct MonsterCandidate(Entity Monster, int Rarity, float Distance)
+        private readonly record struct MonsterCandidate(Entity? Monster, bool PathMatch, int Rarity, float Distance)
         {
-            public bool IsBetterThan(int rarity, float distance) =>
-                Rarity > rarity || (Rarity == rarity && Distance < distance);
+            public bool IsBetterThan(MonsterCandidate other) =>
+                PathMatch != other.PathMatch ? PathMatch :
+                Rarity != other.Rarity ? Rarity > other.Rarity :
+                Distance < other.Distance;
         }
-
-        /// <summary>Linked monsters that came through the current monster pass.</summary>
-        private readonly HashSet<uint> _monstersSeenThisPass = new();
-
-        /// <summary>Released essences whose monster hasn't been seen dead yet (rebuilt each pass, diagnostics only).</summary>
-        private readonly List<EssenceEntityData> _releasedAwaitingKill = new();
-
-        /// <summary>Other monsters already reported near a released monolith, so each is logged once.</summary>
-        private readonly HashSet<uint> _reportedNearbyMonsters = new();
 
         /// <summary>Monotonic clock for every interval here.</summary>
         private readonly Stopwatch _clock = Stopwatch.StartNew();
@@ -198,43 +213,57 @@ namespace BetterEssenceCorruptionHelper
 
         #region Properties
 
-        /// <summary>Enumerates currently tracked entities. Opened ones stay listed with State None.</summary>
-        public IEnumerable<EssenceEntityData> TrackedEntities => _trackedEntities.Values;
+        /// <summary>Essences tracked in the current map. Opened ones stay listed with State None.</summary>
+        public IEnumerable<EssenceEntityData> TrackedEntities => _session.Essences.Values;
+
+        /// <summary>Kill and corruption totals of the current (or, in town/hideout, the last) map.</summary>
+        public MapStatistics MapStats => _session.Stats;
 
         /// <summary>Work counters from the last full second (diagnostics).</summary>
         public TrackerPerformance Performance => _performance;
-
-        public int CandidateMonolithCount => _monoliths.Count;
 
         #endregion
 
         #region Public Methods
 
-        /// <summary>ExileCore EntityAdded: remember monoliths. Cheap - one component lookup per added entity.</summary>
+        /// <summary>
+        /// ExileCore EntityAdded: remember monoliths, and pick up a linked monster coming back into
+        /// range. Cheap - a dictionary lookup plus one component lookup per added entity.
+        /// </summary>
         public void OnEntityAdded(Entity entity)
         {
+            if (entity == null || !_inMap)
+                return;
+
+            if (_session.ByMonsterId.TryGetValue(entity.Id, out var owner))
+            {
+                owner.Monster = entity;
+                return;
+            }
+
             if (!IsMonolithEntity(entity))
                 return;
 
             _monoliths[entity.Id] = entity;
-            if (_trackedEntities.TryGetValue(entity.Id, out var data))
-            {
-                data.Entity = entity;
-                data.IsLoaded = true;
-            }
+            if (_session.Essences.TryGetValue(entity.Id, out var data) && !ReferenceEquals(data.Entity, entity))
+                MarkLoaded(data, entity);
         }
 
-        /// <summary>ExileCore EntityRemoved: the monolith left the loaded area. Its tracking data stays until the area changes.</summary>
+        /// <summary>ExileCore EntityRemoved: a monolith or linked monster left the loaded area. Tracking data stays with the map.</summary>
         public void OnEntityRemoved(Entity entity)
         {
-            if (entity == null || !_monoliths.Remove(entity.Id))
+            if (entity == null || !_inMap)
                 return;
 
-            if (_trackedEntities.TryGetValue(entity.Id, out var data))
+            if (_session.ByMonsterId.TryGetValue(entity.Id, out var owner))
             {
-                data.IsLoaded = false;
-                data.Label = null;
+                if (ReferenceEquals(owner.Monster, entity))
+                    owner.Monster = null;
+                return;
             }
+
+            if (_monoliths.Remove(entity.Id) && _session.Essences.TryGetValue(entity.Id, out var data))
+                MarkUnloaded(data);
         }
 
         /// <summary>Per-frame update. <paramref name="canTrack"/> is the shared tracking gate.</summary>
@@ -256,10 +285,14 @@ namespace BetterEssenceCorruptionHelper
             {
                 try
                 {
-                    if (now >= _nextSeedMs)
-                        SeedMonoliths(now, diagnostics);
+                    // Enabled mid-map: no area change has bound a session yet.
+                    if (_session.AreaHash == 0)
+                        EnterMap(_gameController.Area.CurrentArea.Hash, now);
 
-                    ProcessMonoliths(diagnostics);
+                    if (now >= _nextSeedMs)
+                        SeedEntities(now, diagnostics);
+
+                    ProcessMonoliths(now, diagnostics);
                     ReevaluateIfInputsChanged();
                     RefreshLabels(now, diagnostics);
                     AnalyzeLabels(now);
@@ -267,7 +300,7 @@ namespace BetterEssenceCorruptionHelper
                     if (now >= _nextMonsterPassMs)
                     {
                         _nextMonsterPassMs = now + MONSTER_PASS_MS;
-                        ProcessMonsters(diagnostics);
+                        ProcessMonsters(now, diagnostics);
                     }
 
                     if (diagnostics && now >= _nextDiagnosticSummaryMs)
@@ -288,22 +321,31 @@ namespace BetterEssenceCorruptionHelper
                 }
             }
 
-            _performance.EndTick(Stopwatch.GetTimestamp() - started, now, _monoliths.Count, _trackedEntities.Count);
+            _performance.EndTick(Stopwatch.GetTimestamp() - started, now, _monoliths.Count, _session.Essences.Count);
         }
 
         /// <summary>
-        /// Clears tracking data when entering a new area. Entity and label references belong to
-        /// the area being left, so they are always dropped; the display numbering only restarts on
-        /// a new map, so a hideout trip doesn't renumber the essences you come back to.
+        /// Area change. Entity and label references belong to the area being left, so they are always
+        /// dropped; the essences themselves stay with their map. Entering a map resumes its session
+        /// (same essences, numbers, pending outcomes and stats) or starts a new one; town and hideout
+        /// keep the last map's.
         /// </summary>
-        /// <param name="newMap">True when entering a different map instance than the last one</param>
-        public void ResetState(bool newMap)
+        public void OnAreaChanged(AreaInstance area)
         {
-            _trackedEntities.Clear();
+            foreach (var data in _session.Essences.Values)
+            {
+                MarkUnloaded(data);
+
+                // Same for the linked monster. Its link (ID) stays; it is picked up again when it loads,
+                // and it can't count as vanished before it has been seen again in this visit.
+                data.Monster = null;
+                data.MonsterMissingSinceMs = null;
+                data.MonsterLastDistance = float.MaxValue;
+            }
+
             _monoliths.Clear();
-            _byMonsterId.Clear();
-            _reportedNearbyMonsters.Clear();
             _imprisonedChecks.Clear();
+            _leftoverMonsters.Clear();
 
             // Seed again as soon as the new area is trackable: events that arrived before this call
             // belong to the new area too and were just cleared.
@@ -312,8 +354,58 @@ namespace BetterEssenceCorruptionHelper
             _nextLabelScanMs = 0;
             _nextSafetyLabelScanMs = 0;
 
-            if (newMap)
-                _entityIdCounter = 0;
+            _inMap = area == null || !area.IsPeaceful;
+            if (area != null && _inMap)
+                EnterMap(area.Hash, _clock.ElapsedMilliseconds);
+        }
+
+        #endregion
+
+        #region Map Sessions
+
+        /// <summary>Switches to the session of the given map instance, creating it (and evicting the oldest) if new.</summary>
+        private void EnterMap(uint areaHash, long now)
+        {
+            if (!_sessions.TryGetValue(areaHash, out var session))
+            {
+                session = new MapSession(areaHash);
+                _sessions[areaHash] = session;
+
+                if (_sessions.Count > MAX_MAP_SESSIONS)
+                {
+                    var oldest = _sessions.Values.Where(s => s != session).MinBy(s => s.LastEnteredMs)!;
+                    _sessions.Remove(oldest.AreaHash);
+                }
+
+                if (DiagnosticsOn)
+                    LogDiagnostic($"new map instance {areaHash:X8}");
+            }
+            else if (session != _session && DiagnosticsOn)
+            {
+                LogDiagnostic($"back in map instance {areaHash:X8}: {session.Essences.Count} essences remembered");
+            }
+
+            session.LastEnteredMs = now;
+            _session = session;
+        }
+
+        private static void MarkLoaded(EssenceEntityData data, Entity entity)
+        {
+            data.Entity = entity;
+            data.IsLoaded = true;
+            data.SeenTargetableSinceLoad = false;
+            data.UntargetableSinceMs = null;
+        }
+
+        /// <summary>The monolith left the loaded area (or the area was left): drop what referenced live game memory.</summary>
+        private static void MarkUnloaded(EssenceEntityData data)
+        {
+            data.IsLoaded = false;
+            data.Entity = null;
+            data.Label = null;
+            data.LabelSignature = -1;
+            data.SeenTargetableSinceLoad = false;
+            data.UntargetableSinceMs = null;
         }
 
         #endregion
@@ -321,10 +413,11 @@ namespace BetterEssenceCorruptionHelper
         #region Entity Processing
 
         /// <summary>
-        /// Adds any monolith in the entity list that the events didn't report. A full walk of the
-        /// entity list, so it runs once per area and then only every <see cref="RESEED_MS"/>.
+        /// Adds any monolith the events didn't report and re-attaches linked monsters whose
+        /// EntityAdded was missed. A full walk of the entity list, so it runs once per area and then
+        /// only every <see cref="RESEED_MS"/>.
         /// </summary>
-        private void SeedMonoliths(long now, bool diagnostics)
+        private void SeedEntities(long now, bool diagnostics)
         {
             _nextSeedMs = now + RESEED_MS;
             var visited = 0;
@@ -333,6 +426,13 @@ namespace BetterEssenceCorruptionHelper
                 visited++;
                 if (entity == null)
                     continue;
+
+                if (_session.ByMonsterId.TryGetValue(entity.Id, out var owner))
+                {
+                    if (owner.Monster == null && IsEntityValid(entity))
+                        owner.Monster = entity;
+                    continue;
+                }
 
                 // Known and still live: nothing to do. A different, dead Entity under the same ID (a
                 // missed EntityRemoved) is replaced, or the monolith would stay invisible all area.
@@ -353,67 +453,88 @@ namespace BetterEssenceCorruptionHelper
         }
 
         /// <summary>
-        /// Per-frame monolith pass over the known monoliths only: start tracking new ones and detect
-        /// release (the monolith turning untargetable).
+        /// Per-frame monolith pass over the loaded monoliths: start tracking new ones and detect
+        /// release (the monolith turning untargetable). Opened monoliths are skipped - nothing about
+        /// them changes any more.
         /// </summary>
-        private void ProcessMonoliths(bool diagnostics)
+        private void ProcessMonoliths(long now, bool diagnostics)
         {
             _validMonoliths = _rejectedMonoliths = _skippedUntargetable = 0;
             if (diagnostics)
                 _seenThisPass.Clear();
 
-            var playerAddress = _gameController.Player?.Address ?? 0;
             foreach (var (id, entity) in _monoliths)
             {
                 _performance.MonolithChecks++;
-                if (!IsValidMonolith(entity, playerAddress, out var monolith))
+
+                if (_session.Essences.TryGetValue(id, out var data))
+                {
+                    if (diagnostics)
+                        _seenThisPass.Add(id);
+                    if (data.IsOpened)
+                        continue;
+
+                    if (!IsEntityValid(entity))
+                    {
+                        _rejectedMonoliths++;
+                        continue;
+                    }
+
+                    _validMonoliths++;
+                    if (!ReferenceEquals(data.Entity, entity))
+                        MarkLoaded(data, entity);
+
+                    UpdateOpenedState(data, entity.IsTargetable, now, diagnostics);
+                    continue;
+                }
+
+                if (!IsValidMonolith(entity))
                 {
                     _rejectedMonoliths++;
                     continue;
                 }
 
                 _validMonoliths++;
-                var targetable = entity.IsTargetable;
 
-                // "Opened" means the monster was released. On 3.29 the Monolith component's
-                // IsOpened/OpenStage never change (confirmed with diagnostics), so the monolith
-                // turning untargetable is the signal that actually fires.
-                var isOpenedNow = !targetable;
-
-                if (!_trackedEntities.TryGetValue(id, out var data))
+                // Only start tracking monoliths that can still be interacted with. One that is already
+                // untargetable was opened before we got here and has nothing to offer.
+                if (!entity.IsTargetable)
                 {
-                    // Only start tracking monoliths that can still be interacted with. One that
-                    // is already untargetable was opened before we got here (e.g. coming back
-                    // from the hideout) and has nothing to offer.
-                    if (!targetable)
-                    {
-                        _skippedUntargetable++;
-                        continue;
-                    }
-
-                    data = CreateNewEssenceData(entity);
+                    _skippedUntargetable++;
+                    continue;
                 }
 
+                data = CreateNewEssenceData(entity);
                 if (diagnostics)
+                {
                     _seenThisPass.Add(id);
-
-                data.Entity = entity;
-                data.IsLoaded = true;
-                data.Address = entity.Address;
-                data.OpenStage = monolith.OpenStage;
-                data.GridPos = entity.GridPosNum;
-
-                if (!data.IsOpened)
-                {
-                    if (!isOpenedNow)
-                        data.WasSeenClosed = true;
-                    else if (data.WasSeenClosed)
-                        HandleEssenceOpened(data);
+                    LogSnapshotIfChanged(data, true);
                 }
-
-                if (diagnostics)
-                    LogSnapshotIfChanged(data, targetable);
             }
+        }
+
+        /// <summary>
+        /// "Opened" means the monster was released. On 3.29 the Monolith component's IsOpened/OpenStage
+        /// never change (confirmed with diagnostics), so the monolith turning untargetable is the signal
+        /// that actually fires. It has to hold for <see cref="OPEN_CONFIRM_MS"/>, so a misread while the
+        /// entity loads back in doesn't release an essence that is still waiting.
+        /// </summary>
+        private void UpdateOpenedState(EssenceEntityData data, bool targetable, long now, bool diagnostics)
+        {
+            if (targetable)
+            {
+                data.SeenTargetableSinceLoad = true;
+                data.UntargetableSinceMs = null;
+            }
+            else
+            {
+                data.UntargetableSinceMs ??= now;
+                if (now - data.UntargetableSinceMs.Value >= OPEN_CONFIRM_MS)
+                    HandleEssenceOpened(data, now, observed: data.SeenTargetableSinceLoad);
+            }
+
+            if (diagnostics)
+                LogSnapshotIfChanged(data, targetable);
         }
 
         /// <summary>
@@ -425,13 +546,13 @@ namespace BetterEssenceCorruptionHelper
             var newData = new EssenceEntityData
             {
                 Id = entity.Id,
-                EntityId = ++_entityIdCounter,
-                Address = entity.Address,
+                EntityId = ++_session.LastDisplayNumber,
                 Entity = entity,
-                WasSeenClosed = true,
+                GridPos = entity.GridPosNum,
+                SeenTargetableSinceLoad = true,
             };
 
-            _trackedEntities[entity.Id] = newData;
+            _session.Essences[entity.Id] = newData;
             _nextLabelScanMs = 0;
             return newData;
         }
@@ -443,21 +564,17 @@ namespace BetterEssenceCorruptionHelper
         /// known rect, so labels are re-resolved from the visible list rather than cached forever. The
         /// list is only walked while it can change the outcome: when a tracked essence that is on
         /// screen has no visible label (at most every <see cref="LABEL_SCAN_MIN_MS"/>), plus a safety
-        /// re-check every <see cref="LABEL_SCAN_SAFETY_MS"/>. Earlier versions walked it every second
-        /// frame for the rest of the map once any essence had been seen, on screen or not, released or not.
+        /// re-check every <see cref="LABEL_SCAN_SAFETY_MS"/>.
         /// </summary>
         private void RefreshLabels(long now, bool diagnostics)
         {
             var anyCandidate = false;
             var needsScan = false;
             var screen = new ScreenTest(_gameController);
-            foreach (var data in _trackedEntities.Values)
+            foreach (var data in _session.Essences.Values)
             {
                 if (data.IsOpened || !data.IsLoaded)
-                {
-                    data.Label = null;
                     continue;
-                }
 
                 anyCandidate = true;
 
@@ -484,11 +601,12 @@ namespace BetterEssenceCorruptionHelper
             var monolithLabels = 0;
 
             // One pass over the labels, indexing the ones that belong to tracked essences by entity
-            // ID - the same key the tracking uses, and what AutoExile matches monolith labels on.
+            // ID - the same key the tracking uses.
             _labelsById.Clear();
             for (var i = 0; i < labels.Count; i++)
             {
-                var item = labels[i]?.ItemOnGround;
+                var label = labels[i];
+                var item = label?.ItemOnGround;
                 if (item == null)
                     continue;
 
@@ -496,11 +614,11 @@ namespace BetterEssenceCorruptionHelper
                 if (countMonolithLabels && item.HasComponent<Monolith>())
                     monolithLabels++;
 
-                if (_trackedEntities.ContainsKey(item.Id))
-                    _labelsById[item.Id] = labels[i];
+                if (_session.Essences.ContainsKey(item.Id))
+                    _labelsById[item.Id] = label!;
             }
 
-            foreach (var data in _trackedEntities.Values)
+            foreach (var data in _session.Essences.Values)
             {
                 if (data.IsOpened || !data.IsLoaded)
                     continue;
@@ -529,7 +647,7 @@ namespace BetterEssenceCorruptionHelper
         /// </summary>
         private void AnalyzeLabels(long now)
         {
-            foreach (var data in _trackedEntities.Values)
+            foreach (var data in _session.Essences.Values)
             {
                 if (data.IsOpened || data.Label == null)
                     continue;
@@ -558,7 +676,7 @@ namespace BetterEssenceCorruptionHelper
 
             _evaluatedFor = inputs;
             var profit = CurrentProfitContext();
-            foreach (var data in _trackedEntities.Values)
+            foreach (var data in _session.Essences.Values)
             {
                 if (!data.IsOpened && data.Analysis.IsValid)
                     ApplyRecommendation(data, StrategyEvaluator.Evaluate(data.Analysis, preferences, profit));
@@ -636,19 +754,16 @@ namespace BetterEssenceCorruptionHelper
             data.PreviousAnalysis = before; // pre-corruption state for the debug comparison
 
             if (oldState == EssenceState.None && before.IsValid)
-            {
-                var rec = StrategyEvaluator.Evaluate(before, _settings.Tracking, CurrentProfitContext());
-                oldState = rec.State;
-            }
+                oldState = StrategyEvaluator.Evaluate(before, _settings.Tracking, CurrentProfitContext()).State;
 
             var wasRecommended = oldState == EssenceState.ShouldCorrupt;
-            data.PendingCorruption = new PendingCorruptionOutcome(before, after, wasRecommended, oldState);
+            data.PendingCorruption = new PendingCorruptionOutcome(before, after, wasRecommended);
             data.PendingMissed = false;
 
-            if (_settings.Debug.ShowDebugInfo.Value)
+            if (DiagnosticsOn)
             {
                 DebugWindow.LogMsg(
-                    $"Essence {data.EntityId} (0x{data.Address:X}) corrupted (pending kill). Recommended: {wasRecommended}", 3,
+                    $"Essence {data.EntityId} (id={data.Id}) corrupted (pending kill). Recommended: {wasRecommended}", 3,
                     wasRecommended ? SharpDX.Color.LightGreen : SharpDX.Color.OrangeRed);
             }
         }
@@ -696,7 +811,7 @@ namespace BetterEssenceCorruptionHelper
             if (error != null)
                 DebugWindow.LogError($"[BECH] Could not append corruption outcome to CSV: {error}");
 
-            if (_settings.Debug.ShowDebugInfo.Value)
+            if (DiagnosticsOn)
             {
                 var gain = record.RealizedGain is { } g ? $", {g:+0.##;-0.##}c at listing prices" : "";
                 DebugWindow.LogMsg($"Essence {data.EntityId} corruption outcome: {outcome?.ToString() ?? "unclassified"}{(ambiguous ? " (ambiguous)" : "")} " +
@@ -707,29 +822,38 @@ namespace BetterEssenceCorruptionHelper
         /// <summary>
         /// Processes the monolith being opened: the monster is released and the chance to corrupt
         /// is gone, so a missed corruption is judged here. The kill itself is only counted once the
-        /// released monster dies (see TrackMonster).
+        /// freed monster dies (see <see cref="UpdateLinkedMonster"/>).
         /// </summary>
-        private void HandleEssenceOpened(EssenceEntityData data)
+        /// <param name="data">The essence whose monolith opened</param>
+        /// <param name="now">Tracker clock (ms)</param>
+        /// <param name="observed">
+        /// False when the monolith was already open the first time it was read after loading back in
+        /// (opened by someone else, or while we were away): nothing is judged and the freed monster is
+        /// not looked for, as it could be anywhere by now.
+        /// </param>
+        private void HandleEssenceOpened(EssenceEntityData data, long now, bool observed)
         {
             if (data.IsOpened)
                 return;
 
             data.IsOpened = true;
+            data.OpenedAtMs = observed ? now : long.MinValue / 2;
 
-            // Check if player missed a corruption opportunity (must run before State is cleared)
-            if (IsMissedCorruption(data))
+            if (!observed)
+            {
+                if (DiagnosticsOn)
+                    LogDiagnostic($"#{data.EntityId} id={data.Id}: found opened after loading back in - not judged, kill can't be counted");
+            }
+            else if (IsMissedCorruption(data)) // must run before State is cleared
             {
                 data.PendingMissed = true;
-                if (_settings.Debug.ShowDebugInfo.Value)
-                    DebugWindow.LogMsg($"MISSED CORRUPTION: Essence {data.EntityId} (0x{data.Address:X}) opened uncorrupted (pending kill)", 3, SharpDX.Color.Orange);
+                if (DiagnosticsOn)
+                    DebugWindow.LogMsg($"MISSED CORRUPTION: Essence {data.EntityId} (id={data.Id}) opened uncorrupted (pending kill)", 3, SharpDX.Color.Orange);
             }
-            else if (_settings.Debug.ShowDebugInfo.Value)
+            else if (DiagnosticsOn)
             {
                 DebugWindow.LogMsg($"Essence {data.EntityId} released", 3, SharpDX.Color.Cyan);
             }
-
-            if (data.MonsterId == null && DiagnosticsOn)
-                LogDiagnostic($"#{data.EntityId} id={data.Id}: released with no linked monster - its kill can't be counted");
 
             // Nothing left to draw for an opened monolith.
             data.State = EssenceState.None;
@@ -737,42 +861,52 @@ namespace BetterEssenceCorruptionHelper
         }
 
         /// <summary>
-        /// Monster pass: links trapped monsters to their monoliths and watches released ones for
-        /// their death. Skipped entirely while no monolith needs a monster linked or watched.
+        /// Monster pass: checks linked monsters through their held entity, then walks the monster list
+        /// only if an essence still needs its trapped or freed monster found.
         /// </summary>
-        private void ProcessMonsters(bool diagnostics)
+        private void ProcessMonsters(long now, bool diagnostics)
         {
-            _monstersSeenThisPass.Clear();
-            _unreleased.Clear();
+            _seekingTrapped.Clear();
+            _seekingFreed.Clear();
             _bestCandidates.Clear();
-            _releasedAwaitingKill.Clear();
 
-            var watchingLinkedMonster = false;
-            foreach (var tracked in _trackedEntities.Values)
+            foreach (var data in _session.Essences.Values)
             {
-                if (!tracked.IsOpened && tracked.GridPos.HasValue)
-                    _unreleased.Add(tracked);
-                else if (diagnostics && tracked.IsOpened && !tracked.MonsterKilled && tracked.GridPos.HasValue)
-                    _releasedAwaitingKill.Add(tracked);
+                if (data.MonsterKilled || data.GridPos == null)
+                    continue;
 
-                if (tracked.MonsterId != null && !tracked.MonsterKilled)
-                    watchingLinkedMonster = true;
+                if (data.MonsterId != null)
+                {
+                    UpdateLinkedMonster(data, now, diagnostics);
+                    if (data.MonsterKilled)
+                        continue;
+                }
+
+                if (!data.IsOpened)
+                {
+                    // Keep looking until the trapped rare is linked; a white or magic add may be linked first.
+                    if (data.IsLoaded && (data.MonsterId == null || data.MonsterRarityRank < (int)MonsterRarity.Rare))
+                        _seekingTrapped.Add(data);
+                }
+                else if (!data.MonsterFreed && now - data.OpenedAtMs <= FREED_LINK_WINDOW_MS)
+                {
+                    _seekingFreed.Add(data);
+                }
             }
 
-            if (_unreleased.Count == 0 && _releasedAwaitingKill.Count == 0 && !watchingLinkedMonster)
+            if (_seekingTrapped.Count == 0 && _seekingFreed.Count == 0)
                 return;
 
-            foreach (var entity in MonsterEntities())
+            foreach (var monster in MonsterEntities())
             {
-                if (entity?.Type != EntityType.Monster)
+                if (monster?.Type != EntityType.Monster || _session.ByMonsterId.ContainsKey(monster.Id) || !monster.IsValid)
                     continue;
 
                 _performance.MonsterVisits++;
-                TrackMonster(entity);
+                ConsiderCandidate(monster);
             }
 
-            ApplyBestMonsterLinks();
-            HandleMissingMonsters();
+            ApplyBestMonsterLinks(now, diagnostics);
         }
 
         /// <summary>Monsters only, from ExileCore's per-type index; the full entity list if that is unavailable.</summary>
@@ -786,40 +920,96 @@ namespace BetterEssenceCorruptionHelper
         }
 
         /// <summary>
-        /// Follows the trapped essence monsters: links an imprisoned one to its monolith, and counts
-        /// the kill when a released one dies.
+        /// Follows an essence's linked monster. Before release there is nothing to watch: a trapped
+        /// monster can't be damaged. After release the linked monster has to be seen alive and free
+        /// before its death counts - the trapped entity may be replaced by a new one when the monolith
+        /// breaks, and that leftover reading dead or disappearing is not a kill.
         /// </summary>
-        private void TrackMonster(Entity monster)
+        private void UpdateLinkedMonster(EssenceEntityData data, long now, bool diagnostics)
         {
-            // A linked monster that isn't loaded right now just counts as "not seen" this pass.
-            if (!monster.IsValid)
+            var id = data.MonsterId!.Value;
+            var monster = data.Monster;
+            if (monster == null || !IsEntityValid(monster))
+            {
+                HandleMissingMonster(data, id, now, diagnostics);
+                return;
+            }
+
+            data.MonsterMissingSinceMs = null;
+            data.MonsterLastDistance = monster.DistancePlayer;
+
+            if (!data.IsOpened)
                 return;
 
-            if (_byMonsterId.TryGetValue(monster.Id, out var data))
+            var deathSignal = GetDeathSignal(monster);
+            if (!data.MonsterFreed)
             {
-                _monstersSeenThisPass.Add(monster.Id);
-                data.Monster = monster;
-                data.MonsterMissingSinceMs = null;
-                data.MonsterLastDistance = monster.DistancePlayer;
-
-                // Only a released monster can die: an imprisoned one can't be damaged at all, so a
-                // "dead" reading before release would be a misread, not a kill.
-                if (data.IsOpened && !data.MonsterKilled)
+                if (deathSignal == null && IsImprisoned(monster, useCache: false) == false)
                 {
-                    if (DiagnosticsOn)
-                        LogMonsterSnapshotIfChanged(data, monster);
-
-                    if (GetDeathSignal(monster) is { } signal)
-                        HandleMonsterKilled(data, signal);
+                    data.MonsterFreed = true;
+                    data.MonsterLastHpFraction = HpFraction(monster);
+                    if (diagnostics)
+                        LogDiagnostic($"#{data.EntityId} id={data.Id}: trapped monster id={id} is the freed monster");
+                }
+                else if (deathSignal != null || now - data.OpenedAtMs > FREED_LINK_WINDOW_MS)
+                {
+                    // Dead the moment it was freed, or still imprisoned long after release: the trapped
+                    // entity was left behind and the freed monster is another one.
+                    _leftoverMonsters.Add(id);
+                    Unlink(data, id, diagnostics, $"trapped entity left behind on release ({deathSignal ?? "still imprisoned"}), not a kill");
                 }
                 return;
             }
 
-            if (_unreleased.Count > 0)
-                ConsiderTrappedMonster(monster);
+            if (diagnostics)
+                LogMonsterSnapshotIfChanged(data, monster);
 
-            if (_releasedAwaitingKill.Count > 0)
-                ReportMonsterNearReleasedMonolith(monster);
+            data.MonsterLastHpFraction = HpFraction(monster);
+            if (deathSignal != null)
+                HandleMonsterKilled(data, deathSignal);
+        }
+
+        /// <summary>
+        /// A linked monster that isn't loaded. Not yet freed (trapped, or the trapped entity on
+        /// release): drop the link so it gets made again - this is how an ID change on corruption or
+        /// release is followed. Freed: if it stays missing past the grace period, was damaged and was
+        /// last seen close to the player, it died without leaving a corpse; otherwise it just left the
+        /// loaded area and keeps its link (same ID when it comes back).
+        /// </summary>
+        private void HandleMissingMonster(EssenceEntityData data, uint id, long now, bool diagnostics)
+        {
+            if (!data.MonsterFreed)
+            {
+                Unlink(data, id, diagnostics, data.IsOpened
+                    ? "trapped entity gone on release, not a kill - looking for the freed monster"
+                    : "trapped monster unloaded or replaced");
+                return;
+            }
+
+            if (data.MonsterMissingSinceMs == null)
+            {
+                data.MonsterMissingSinceMs = now;
+                if (diagnostics)
+                    LogDiagnostic($"#{data.EntityId} id={data.Id}: freed monster id={id} missing, last seen {data.MonsterLastDistance:F0} grid away at {data.MonsterLastHpFraction:P0} life");
+                return;
+            }
+
+            if (now - data.MonsterMissingSinceMs.Value < MONSTER_VANISH_GRACE_MS)
+                return;
+
+            if (data.MonsterLastDistance <= MONSTER_VANISH_KILL_DISTANCE && data.MonsterLastHpFraction < 1f)
+                HandleMonsterKilled(data, $"vanished {data.MonsterLastDistance:F0} grid away at {data.MonsterLastHpFraction:P0} life");
+        }
+
+        private void Unlink(EssenceEntityData data, uint id, bool diagnostics, string reason)
+        {
+            _session.ByMonsterId.Remove(id);
+            data.MonsterId = null;
+            data.Monster = null;
+            data.MonsterMissingSinceMs = null;
+
+            if (diagnostics)
+                LogDiagnostic($"#{data.EntityId} id={data.Id}: unlinked monster id={id}: {reason}");
         }
 
         /// <summary>
@@ -839,17 +1029,61 @@ namespace BetterEssenceCorruptionHelper
         }
 
         /// <summary>
-        /// Records a monster as a candidate for the nearest unreleased monolith if it is one of that
-        /// monolith's prisoners - it stands on the monolith and carries the MonsterInsideMonolith
-        /// stat. The best candidate per monolith is linked at the end of the pass.
+        /// Current life plus energy shield as a fraction of max (0..1); 1 when unreadable, so an unknown
+        /// never reads as damaged.
         /// </summary>
-        private void ConsiderTrappedMonster(Entity monster)
+        private static float HpFraction(Entity monster)
+        {
+            try
+            {
+                if (!monster.TryGetComponent<Life>(out var life) || life == null)
+                    return 1f;
+
+                var max = life.MaxHP + life.MaxES;
+                return max > 0 ? Math.Clamp((life.CurHP + life.CurES) / (float)max, 0f, 1f) : 1f;
+            }
+            catch
+            {
+                return 1f;
+            }
+        }
+
+        /// <summary>
+        /// Offers a monster to the nearest essence looking for one. Before release: one of the
+        /// monolith's prisoners (standing on it, MonsterInsideMonolith stat). After release: an alive,
+        /// hostile, free monster next to the monolith that is the trapped one's kind (same metadata
+        /// path) or at least rare. The best candidate per essence is linked at the end of the pass.
+        /// </summary>
+        private void ConsiderCandidate(Entity monster)
         {
             var position = monster.GridPosNum;
-            EssenceEntityData? nearest = null;
-            var nearestDistance = MONSTER_LINK_RADIUS;
 
-            foreach (var data in _unreleased)
+            // Distance first because it is cheap; the stats are only read for a monster standing
+            // on a monolith.
+            if (_seekingTrapped.Count > 0 &&
+                FindNearest(_seekingTrapped, position, MONSTER_LINK_RADIUS, out var trapped, out var trappedDistance) &&
+                IsImprisoned(monster, useCache: true) == true)
+            {
+                Offer(trapped, new MonsterCandidate(monster, false, RarityRank(monster), trappedDistance));
+            }
+
+            if (_seekingFreed.Count > 0 && !_leftoverMonsters.Contains(monster.Id) &&
+                FindNearest(_seekingFreed, position, FREED_LINK_RADIUS, out var freed, out var freedDistance) &&
+                monster.IsAlive && monster.IsHostile && IsImprisoned(monster, useCache: false) == false)
+            {
+                var rank = RarityRank(monster);
+                var pathMatch = freed.MonsterPath != null && monster.Path == freed.MonsterPath;
+                if (pathMatch || rank >= (int)MonsterRarity.Rare)
+                    Offer(freed, new MonsterCandidate(monster, pathMatch, rank, freedDistance));
+            }
+        }
+
+        private static bool FindNearest(List<EssenceEntityData> essences, Vector2 position, float radius,
+            [NotNullWhen(true)] out EssenceEntityData? nearest, out float nearestDistance)
+        {
+            nearest = null;
+            nearestDistance = radius;
+            foreach (var data in essences)
             {
                 var distance = Vector2.Distance(position, data.GridPos!.Value);
                 if (distance < nearestDistance)
@@ -859,49 +1093,71 @@ namespace BetterEssenceCorruptionHelper
                 }
             }
 
-            // Distance first because it is cheap; the stats are only read for a monster standing
-            // on a monolith.
-            if (nearest == null || !IsImprisoned(monster))
-                return;
+            return nearest != null;
+        }
 
-            var candidate = new MonsterCandidate(monster, RarityRank(monster), nearestDistance);
-            if (!_bestCandidates.TryGetValue(nearest.Id, out var best) || candidate.IsBetterThan(best.Rarity, best.Distance))
-                _bestCandidates[nearest.Id] = candidate;
+        private void Offer(EssenceEntityData data, MonsterCandidate candidate)
+        {
+            if (!_bestCandidates.TryGetValue(data.Id, out var best) || candidate.IsBetterThan(best))
+                _bestCandidates[data.Id] = candidate;
         }
 
         /// <summary>
-        /// Links each unreleased monolith to the best imprisoned monster seen this pass, replacing
-        /// the current link only when the new one ranks higher. So an add that happened to be
-        /// linked first is swapped out as soon as the rare essence monster is seen.
+        /// Links each essence to the best monster seen for it this pass. A trapped link is replaced
+        /// only by a higher-ranked prisoner, so an add that happened to be linked first is swapped out
+        /// as soon as the rare essence monster is seen. After release any free candidate replaces an
+        /// unconfirmed link - that link is the trapped entity, which hasn't shown itself free.
         /// </summary>
-        private void ApplyBestMonsterLinks()
+        private void ApplyBestMonsterLinks(long now, bool diagnostics)
         {
             foreach (var (essenceId, candidate) in _bestCandidates)
             {
-                if (!_trackedEntities.TryGetValue(essenceId, out var data) || data.MonsterId == candidate.Monster.Id)
+                var monster = candidate.Monster!;
+                if (!_session.Essences.TryGetValue(essenceId, out var data) || data.MonsterId == monster.Id)
+                    continue;
+
+                // After release, a monster of another kind is only taken once none of the trapped one's
+                // kind showed up, and never over the trapped entity itself.
+                if (data.IsOpened && data.MonsterPath != null && !candidate.PathMatch &&
+                    (data.MonsterId != null || now - data.OpenedAtMs < FREED_PATH_ONLY_MS))
                     continue;
 
                 var previous = data.MonsterId;
                 if (previous != null)
                 {
-                    if (!candidate.IsBetterThan(data.MonsterRarityRank, data.MonsterLinkDistance))
+                    if (!data.IsOpened && !candidate.IsBetterThan(new MonsterCandidate(null, false, data.MonsterRarityRank, data.MonsterLinkDistance)))
                         continue;
 
-                    _byMonsterId.Remove(previous.Value);
+                    _session.ByMonsterId.Remove(previous.Value);
+                    if (data.IsOpened)
+                        _leftoverMonsters.Add(previous.Value);
                 }
 
-                var monster = candidate.Monster;
                 data.MonsterId = monster.Id;
                 data.Monster = monster;
                 data.MonsterRarityRank = candidate.Rarity;
                 data.MonsterLinkDistance = candidate.Distance;
-                _byMonsterId[monster.Id] = data;
-                _monstersSeenThisPass.Add(monster.Id);
+                data.MonsterMissingSinceMs = null;
+                data.MonsterLastDistance = monster.DistancePlayer;
+                _session.ByMonsterId[monster.Id] = data;
 
-                if (DiagnosticsOn)
+                if (data.IsOpened)
                 {
-                    LogDiagnostic($"#{data.EntityId} id={data.Id}: linked trapped monster id={monster.Id} " +
-                                  $"({monster.RenderName}, {RarityName(candidate.Rarity)}, {candidate.Distance:F1} grid away)" +
+                    // Candidates after release are alive and free by construction.
+                    data.MonsterFreed = true;
+                    data.MonsterLastHpFraction = HpFraction(monster);
+                    data.MonsterPath ??= monster.Path;
+                }
+                else
+                {
+                    data.MonsterPath = monster.Path;
+                }
+
+                if (diagnostics)
+                {
+                    LogDiagnostic($"#{data.EntityId} id={data.Id}: linked {(data.IsOpened ? "freed" : "trapped")} monster id={monster.Id} " +
+                                  $"({monster.RenderName}, {RarityName(candidate.Rarity)}, {candidate.Distance:F1} grid away" +
+                                  (data.IsOpened ? $", path {(candidate.PathMatch ? "matches" : "differs from")} the trapped one)" : ")") +
                                   (previous != null ? $", replacing id={previous}" : ""));
                 }
             }
@@ -909,22 +1165,28 @@ namespace BetterEssenceCorruptionHelper
 
         /// <summary>
         /// Whether the monster is still imprisoned in a monolith (MonsterInsideMonolith stat). Reads
-        /// are cached briefly per monster, as the pack around a monolith is re-checked every pass.
+        /// are cached briefly per monster for the candidate search, as the pack around a monolith is
+        /// re-checked every pass; the linked monster's release is read fresh.
         /// </summary>
-        private bool IsImprisoned(Entity monster)
+        /// <returns>Null when the stats can't be read - neither imprisoned nor free is assumed then.</returns>
+        private bool? IsImprisoned(Entity monster, bool useCache)
         {
             var now = _clock.ElapsedMilliseconds;
-            if (_imprisonedChecks.TryGetValue(monster.Id, out var check) && now - check.CheckedAtMs < IMPRISONED_CHECK_TTL_MS)
+            if (useCache && _imprisonedChecks.TryGetValue(monster.Id, out var check) && now - check.CheckedAtMs < IMPRISONED_CHECK_TTL_MS)
                 return check.Imprisoned;
 
             bool imprisoned;
             try
             {
-                imprisoned = monster.Stats?.GetValueOrDefault(GameStat.MonsterInsideMonolith) > 0;
+                var stats = monster.Stats;
+                if (stats == null)
+                    return null;
+
+                imprisoned = stats.GetValueOrDefault(GameStat.MonsterInsideMonolith) > 0;
             }
             catch
             {
-                return false; // unreadable stats - don't cache, just try again next pass
+                return null; // unreadable stats - don't cache, just try again next pass
             }
 
             _imprisonedChecks[monster.Id] = (imprisoned, now);
@@ -948,73 +1210,25 @@ namespace BetterEssenceCorruptionHelper
         internal static string RarityName(int rank) =>
             rank is >= 0 and <= (int)MonsterRarity.Unique ? ((MonsterRarity)rank).ToString() : "unknown rarity";
 
-        /// <summary>
-        /// Handles linked monsters that didn't come through this pass.
-        ///
-        /// Unreleased: drop the link so it gets made again - e.g. if corrupting replaced the
-        /// monster entity, or both just left the loaded area.
-        ///
-        /// Released: if it stays missing past the grace period and was last seen close to the
-        /// player, it died without leaving a corpse in the entity list. If it was far away it most
-        /// likely just left the loaded area, so the link is kept and it can still die later.
-        /// </summary>
-        private void HandleMissingMonsters()
-        {
-            foreach (var data in _trackedEntities.Values)
-            {
-                if (data.MonsterKilled || data.MonsterId is not { } monsterId || _monstersSeenThisPass.Contains(monsterId))
-                    continue;
-
-                if (!data.IsOpened)
-                {
-                    _byMonsterId.Remove(monsterId);
-                    data.MonsterId = null;
-                    data.Monster = null;
-
-                    if (DiagnosticsOn)
-                        LogDiagnostic($"#{data.EntityId} id={data.Id}: trapped monster id={monsterId} not in scan, unlinked");
-                    continue;
-                }
-
-                var now = _clock.ElapsedMilliseconds;
-                if (data.MonsterMissingSinceMs == null)
-                {
-                    data.MonsterMissingSinceMs = now;
-
-                    if (DiagnosticsOn)
-                        LogDiagnostic($"#{data.EntityId} id={data.Id}: released monster id={monsterId} not in scan, last seen {data.MonsterLastDistance:F0} grid away ({DescribeMissingMonster(data.Monster)})");
-                    continue;
-                }
-
-                if (now - data.MonsterMissingSinceMs.Value < MONSTER_VANISH_GRACE_MS)
-                    continue;
-
-                if (data.MonsterLastDistance <= MONSTER_VANISH_KILL_DISTANCE)
-                    HandleMonsterKilled(data, $"vanished {data.MonsterLastDistance:F0} grid away");
-            }
-        }
-
-        /// <summary>The released essence monster died - this is the "killed" event.</summary>
+        /// <summary>The freed essence monster died - this is the "killed" event.</summary>
         private void HandleMonsterKilled(EssenceEntityData data, string signal)
         {
-            if (!data.IsOpened)
-                HandleEssenceOpened(data);
-
             data.MonsterKilled = true;
+            var stats = _session.Stats;
 
             // Commit pending corruption or missed outcome now that the monster is confirmed dead
             if (data.PendingCorruption is { } pending)
             {
                 if (pending.WasRecommended)
                 {
-                    _mapStats.IncrementCorrupted();
-                    if (_settings.Debug.ShowDebugInfo.Value)
+                    stats.IncrementCorrupted();
+                    if (DiagnosticsOn)
                         DebugWindow.LogMsg($"SUCCESSFUL CORRUPTION CONFIRMED: Essence {data.EntityId} killed", 3, SharpDX.Color.LightGreen);
                 }
                 else
                 {
-                    _mapStats.IncrementMistakes();
-                    if (_settings.Debug.ShowDebugInfo.Value)
+                    stats.IncrementMistakes();
+                    if (DiagnosticsOn)
                         DebugWindow.LogMsg($"MISTAKEN CORRUPTION CONFIRMED: Essence {data.EntityId} killed", 3, SharpDX.Color.OrangeRed);
                 }
 
@@ -1023,18 +1237,18 @@ namespace BetterEssenceCorruptionHelper
             }
             else if (data.PendingMissed)
             {
-                _mapStats.IncrementMissed();
+                stats.IncrementMissed();
                 _corruptionLog.RecordMissed();
-                if (_settings.Debug.ShowDebugInfo.Value)
+                if (DiagnosticsOn)
                     DebugWindow.LogMsg($"MISSED CORRUPTION CONFIRMED: Essence {data.EntityId} killed without corrupting", 3, SharpDX.Color.Orange);
                 data.PendingMissed = false;
             }
 
-            _mapStats.IncrementKilled();
+            stats.IncrementKilled();
             _corruptionLog.RecordKill();
 
-            if (_settings.Debug.ShowDebugInfo.Value)
-                DebugWindow.LogMsg($"Essence {data.EntityId}: monster killed ({signal})", 3, SharpDX.Color.Cyan);
+            if (DiagnosticsOn)
+                DebugWindow.LogMsg($"Essence {data.EntityId}: monster id={data.MonsterId} killed ({signal})", 3, SharpDX.Color.Cyan);
         }
 
         /// <summary>
@@ -1047,10 +1261,7 @@ namespace BetterEssenceCorruptionHelper
 
             var state = data.State;
             if (state == EssenceState.None && data.Analysis.IsValid)
-            {
-                var rec = StrategyEvaluator.Evaluate(data.Analysis, _settings.Tracking, CurrentProfitContext());
-                state = rec.State;
-            }
+                state = StrategyEvaluator.Evaluate(data.Analysis, _settings.Tracking, CurrentProfitContext()).State;
 
             return state == EssenceState.ShouldCorrupt;
         }
@@ -1095,7 +1306,7 @@ namespace BetterEssenceCorruptionHelper
             var linked = 0;
             var killed = 0;
 
-            foreach (var data in _trackedEntities.Values)
+            foreach (var data in _session.Essences.Values)
             {
                 if (data.IsOpened) opened++;
                 if (data.Label != null) withLabel++;
@@ -1116,7 +1327,7 @@ namespace BetterEssenceCorruptionHelper
 
             var summary =
                 $"scan: {_validMonoliths} valid monoliths ({_rejectedMonoliths} more rejected as invalid, {_skippedUntargetable} untargetable and untracked), " +
-                $"{_trackedEntities.Count} tracked ({opened} released, {linked} with a linked monster, {killed} monsters killed), {withLabel} with a visible label";
+                $"{_session.Essences.Count} tracked ({opened} released, {linked} with a linked monster, {killed} monsters killed), {withLabel} with a visible label";
 
             if (summary != _lastScanSummary)
             {
@@ -1146,7 +1357,7 @@ namespace BetterEssenceCorruptionHelper
             }
         }
 
-        /// <summary>Logs a released monster's state, but only when it differs from the last one.</summary>
+        /// <summary>Logs a freed monster's state, but only when it differs from the last one.</summary>
         private static void LogMonsterSnapshotIfChanged(EssenceEntityData data, Entity monster)
         {
             var snapshot = DescribeMonster(monster);
@@ -1174,55 +1385,6 @@ namespace BetterEssenceCorruptionHelper
             return $"alive={monster.IsAlive} dead={monster.IsDead} hp={hp} targetable={monster.IsTargetable} hidden={monster.IsHidden}";
         }
 
-        /// <summary>What a released monster's last entity reference says now that it is missing from the scan.</summary>
-        private static string DescribeMissingMonster(Entity? monster)
-        {
-            if (monster == null)
-                return "no entity";
-
-            try
-            {
-                return $"valid={monster.IsValid} {DescribeMonster(monster)}";
-            }
-            catch (Exception ex)
-            {
-                return $"entity unreadable: {ex.GetType().Name}";
-            }
-        }
-
-        /// <summary>
-        /// Reports, once each, other monsters standing on a released monolith. If the game spawns a
-        /// fresh entity for the released monster instead of reusing the trapped one, this is where
-        /// it shows up.
-        /// </summary>
-        private void ReportMonsterNearReleasedMonolith(Entity monster)
-        {
-            if (_reportedNearbyMonsters.Contains(monster.Id))
-                return;
-
-            var position = monster.GridPosNum;
-            foreach (var data in _releasedAwaitingKill)
-            {
-                var distance = Vector2.Distance(position, data.GridPos!.Value);
-                if (distance > MONSTER_LINK_RADIUS)
-                    continue;
-
-                if (data.MonsterId == null && monster.IsAlive)
-                {
-                    data.MonsterId = monster.Id;
-                    data.Monster = monster;
-                    _byMonsterId[monster.Id] = data;
-                    if (DiagnosticsOn)
-                        LogDiagnostic($"#{data.EntityId}: linked released monster id={monster.Id} ({monster.RenderName}) {distance:F1} grid away");
-                    return;
-                }
-
-                _reportedNearbyMonsters.Add(monster.Id);
-                LogDiagnostic($"#{data.EntityId}: other monster near released monolith: id={monster.Id} ({monster.RenderName}, {monster.Rarity}, {distance:F1} grid away) {DescribeMonster(monster)}");
-                return;
-            }
-        }
-
         #endregion
 
         #region Entity Validation & Helpers
@@ -1244,25 +1406,16 @@ namespace BetterEssenceCorruptionHelper
         }
 
         /// <summary>
-        /// Validates if an entity is a loaded essence monolith, and returns its Monolith component.
-        /// IsTargetable is deliberately not required here: a monolith stops being targetable once
-        /// opened, and a tracked one has to stay visible to us for that flip to be seen.
+        /// Validates a not-yet-tracked monolith entity before tracking starts. IsTargetable is
+        /// checked separately: a monolith stops being targetable once opened.
         /// </summary>
-        private static bool IsValidMonolith([NotNullWhen(true)] Entity? entity, long playerAddress, [NotNullWhen(true)] out Monolith? monolith)
+        private static bool IsValidMonolith(Entity entity)
         {
-            monolith = null;
-
-            // Fast rejection checks first
-            if (entity == null || entity.Address == 0 || !entity.IsValid || entity.Address == playerAddress)
-                return false;
-
-            // Component checks
-            if (!entity.HasComponent<Render>() || !entity.TryGetComponent<Monolith>(out monolith) || monolith == null)
-                return false;
-
-            // Position validation (try-catch for safety against memory read errors)
             try
             {
+                if (entity.Address == 0 || !entity.IsValid || !entity.HasComponent<Render>() || !entity.HasComponent<Monolith>())
+                    return false;
+
                 var pos = entity.PosNum;
                 return pos.X != 0 || pos.Y != 0 || pos.Z != 0;
             }
@@ -1345,8 +1498,8 @@ namespace BetterEssenceCorruptionHelper
 
     /// <summary>
     /// Work the tracker did over the last full second, for the diagnostics view. Counts, not
-    /// guesses: "entity visits" is what the tracker actually touched, and <see cref="EntityListSize"/>
-    /// is what the previous design walked on every 50ms pass (20 times a second).
+    /// guesses: "entity visits" is what the tracker actually touched, next to the size of the entity
+    /// list it avoids walking.
     /// </summary>
     internal sealed class TrackerPerformance
     {

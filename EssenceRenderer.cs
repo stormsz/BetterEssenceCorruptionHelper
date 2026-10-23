@@ -22,21 +22,19 @@ namespace BetterEssenceCorruptionHelper
     /// </remarks>
     /// <param name="gameController">The game controller instance</param>
     /// <param name="settings">Plugin settings</param>
-    /// <param name="mapStats">Statistics tracker</param>
-    /// <param name="entityTracker">Entity tracker</param>
+    /// <param name="entityTracker">Entity tracker (essences and stats of the current map)</param>
     /// <param name="prices">Price snapshot</param>
     /// <param name="values">Complete essence values built from the price snapshot</param>
     /// <param name="setup">Map setup read from the game</param>
     /// <param name="corruptionLog">Observed corruption outcomes</param>
     /// <param name="icons">Essence and currency icons</param>
-    internal class EssenceRenderer(GameController gameController, Settings settings, MapStatistics mapStats, EssenceEntityTracker entityTracker,
+    internal class EssenceRenderer(GameController gameController, Settings settings, EssenceEntityTracker entityTracker,
         PriceBook prices, EssenceValues values, SetupDetector setup, CorruptionLog corruptionLog, EssenceIcons? icons = null)
     {
         #region Fields
 
         private readonly GameController _gameController = gameController;
         private readonly Settings _settings = settings;
-        private readonly MapStatistics _mapStats = mapStats;
         private readonly EssenceEntityTracker _entityTracker = entityTracker;
         private readonly PriceBook _prices = prices;
         private readonly EssenceValues _values = values;
@@ -44,10 +42,11 @@ namespace BetterEssenceCorruptionHelper
         private readonly CorruptionLog _corruptionLog = corruptionLog;
         private readonly EssenceIcons? _icons = icons;
 
-        /// <summary>Debug overlay content per essence, rebuilt only when its inputs change.</summary>
-        private readonly Dictionary<uint, (int Key, List<DebugLine> Lines, float Width)> _debugCache = new();
+        /// <summary>Debug overlay content (and its ImGui window name) per essence, rebuilt only when its inputs change.</summary>
+        private readonly Dictionary<uint, (int Key, List<DebugLine> Lines, float Width, string WindowName)> _debugCache = new();
 
-        private (int, int, int, int) _statsKey = (-1, -1, -1, -1);
+        /// <summary>Inputs the stats window text was built from; the stats object changes with the map.</summary>
+        private (MapStatistics?, int, int, int, int) _statsKey = (null, -1, -1, -1, -1);
         private readonly List<(string Text, Color Color)> _statsLines = new();
 
         #endregion
@@ -355,7 +354,7 @@ namespace BetterEssenceCorruptionHelper
                         width = lineWidth;
                 }
 
-                cached = (key, lines, width);
+                cached = (key, lines, width, $"###EssenceDebug_{data.Id}");
                 _debugCache[data.Id] = cached;
             }
 
@@ -363,9 +362,6 @@ namespace BetterEssenceCorruptionHelper
 
             // Position flush to right edge of monolith card
             var debugWindowPos = new Vector2(cardRect.Right + 5f, cardRect.Top);
-
-            // UNIQUE window ID for THIS SPECIFIC essence
-            var windowName = $"###EssenceDebug_{data.EntityId}";
 
             // Window flags for fixed, non-interactive overlay
             var windowFlags = ImGuiWindowFlags.NoDecoration |
@@ -401,7 +397,7 @@ namespace BetterEssenceCorruptionHelper
             // Begin unique window for THIS essence.
             // ImGui requires End() for every Begin() regardless of the return value - only the
             // body is conditional. Skipping it corrupts the window stack.
-            if (ImGui.Begin(windowName, windowFlags))
+            if (ImGui.Begin(cached.WindowName, windowFlags))
             {
                 var iconSize = ImGui.GetTextLineHeight();
                 if (iconSize <= 0) iconSize = 14f;
@@ -457,11 +453,12 @@ namespace BetterEssenceCorruptionHelper
                 (_gameController.Area.CurrentArea.IsPeaceful && !_settings.MapStats.ShowInTownHideout.Value))
                 return;
 
-            var key = (_mapStats.Version, _corruptionLog.Version, _settings.Tracking.Version, _setup.Version);
+            var mapStats = _entityTracker.MapStats;
+            var key = (mapStats, mapStats.Version, _corruptionLog.Version, _settings.Tracking.Version, _setup.Version);
             if (key != _statsKey)
             {
                 _statsKey = key;
-                BuildStatsLines();
+                BuildStatsLines(mapStats);
             }
 
             // Apply custom window styling
@@ -493,16 +490,16 @@ namespace BetterEssenceCorruptionHelper
         }
 
         /// <summary>Stats window text - rebuilt only when the stats, the outcome log or the strategy change.</summary>
-        private void BuildStatsLines()
+        private void BuildStatsLines(MapStatistics mapStats)
         {
             _statsLines.Clear();
             var statColor = _settings.MapStats.TextColor.Value;
 
             // Map Totals
-            _statsLines.Add(($"  Killed: {_mapStats.TotalKilled}", statColor));
-            _statsLines.Add(($"  Corrupted: {_mapStats.TotalCorrupted}", statColor));
-            _statsLines.Add(($"  Missed: {_mapStats.TotalMissed}", _mapStats.TotalMissed > 0 ? Color.Orange : statColor));
-            _statsLines.Add(($"  Wrongly corrupted: {_mapStats.TotalMistakes}", _mapStats.TotalMistakes > 0 ? Color.OrangeRed : statColor));
+            _statsLines.Add(($"  Killed: {mapStats.TotalKilled}", statColor));
+            _statsLines.Add(($"  Corrupted: {mapStats.TotalCorrupted}", statColor));
+            _statsLines.Add(($"  Missed: {mapStats.TotalMissed}", mapStats.TotalMissed > 0 ? Color.Orange : statColor));
+            _statsLines.Add(($"  Wrongly corrupted: {mapStats.TotalMistakes}", mapStats.TotalMistakes > 0 ? Color.OrangeRed : statColor));
 
             _statsLines.Add(("", statColor));
             _statsLines.Add(($"Strategy: {_settings.Tracking.Strategy.DisplayName}", Color.LightSkyBlue));
