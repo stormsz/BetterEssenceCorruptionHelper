@@ -1,26 +1,31 @@
-# This workflow will build a .NET project
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-net
+# Runs the tests on every push to main and every pull request. A v* tag also builds the plugin and
+# publishes it as a GitHub release, but only once the tests pass.
 name: Build & Release Plugin
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
+  pull_request:
 
 env:
   PLUGIN_NAME: BetterEssenceCorruptionHelper
 
 permissions:
-  contents: write
-  
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
 
-    - uses: actions/setup-dotnet@v4
+    - uses: actions/setup-dotnet@v6
       with:
         # Must cover the csproj's TargetFramework (net10.0-windows since the ExileApi 329.x /
         # PoE 3.29 update). An older SDK here fails the build outright.
@@ -32,28 +37,61 @@ jobs:
         wget -q https://github.com/exApiTools/ExileApi-Compiled/raw/refs/heads/master/ExileCore.dll -O libs/ExileCore.dll
         wget -q https://github.com/exApiTools/ExileApi-Compiled/raw/refs/heads/master/GameOffsets.dll -O libs/GameOffsets.dll
 
+    - name: Run tests
+      # xunit v3 tests are an executable: .NET 10's dotnet test no longer runs them through VSTest.
+      run: dotnet run --project tests/${{ env.PLUGIN_NAME }}.Tests -p:CI_LIBS_PATH=${{ github.workspace }}/libs
+
     - name: Build Release DLL
       # Point the csproj's DepsDir at the downloaded DLLs. Without this, HintPath falls back to
       # ..\..\.. (the HUD layout) and the build only resolved by luck, via MSBuild scanning the
-      # project folder for loose .dll files.
-      run: dotnet build ${{ env.PLUGIN_NAME }}.csproj --configuration Release -p:CI_LIBS_PATH=${{ github.workspace }}/libs
+      # project folder for loose .dll files. On a tag, the DLL gets its version (v1.8.0 -> 1.8.0).
+      run: |
+        version=()
+        if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version=("-p:Version=${GITHUB_REF_NAME#v}"); fi
+        dotnet build ${{ env.PLUGIN_NAME }}.csproj --configuration Release -p:CI_LIBS_PATH=${{ github.workspace }}/libs "${version[@]}"
 
     - name: Create plugin folder
+      if: startsWith(github.ref, 'refs/tags/v')
       run: |
         mkdir -p release/${{ env.PLUGIN_NAME }}
         # Glob the TFM so a future retarget doesn't silently break packaging.
         cp bin/Release/*/${{ env.PLUGIN_NAME }}.dll release/${{ env.PLUGIN_NAME }}/
 
     - name: Zip plugin
+      if: startsWith(github.ref, 'refs/tags/v')
       run: |
         cd release
         zip -r ${{ env.PLUGIN_NAME }}.zip ${{ env.PLUGIN_NAME }}
 
-    - name: Publish Release
-      uses: softprops/action-gh-release@v1
+    - uses: actions/upload-artifact@v7
+      if: startsWith(github.ref, 'refs/tags/v')
       with:
-        tag_name: ${{ github.ref_name }}
-        files: release/${{ env.PLUGIN_NAME }}.zip
-        token: ${{ secrets.GITHUB_TOKEN }}
-        body: |
+        name: plugin
+        path: release/${{ env.PLUGIN_NAME }}.zip
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    # The only job that can write to the repo.
+    permissions:
+      contents: write
+
+    steps:
+    - uses: actions/download-artifact@v8
+      with:
+        name: plugin
+
+    - name: Publish Release
+      # Re-pushing a tag replaces the zip on its existing release.
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        NOTES: |
           **This plugin is completely free! There are no payments required or accepted for using this plugin. If you "purchased" it, you have been scammed.**
+      run: |
+        if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+          gh release upload "$GITHUB_REF_NAME" ${{ env.PLUGIN_NAME }}.zip --clobber
+        else
+          gh release create "$GITHUB_REF_NAME" ${{ env.PLUGIN_NAME }}.zip --title "$GITHUB_REF_NAME" --notes "$NOTES"
+        fi

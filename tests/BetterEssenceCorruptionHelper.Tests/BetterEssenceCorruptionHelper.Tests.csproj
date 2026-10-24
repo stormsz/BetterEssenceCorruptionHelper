@@ -1,8 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <!--
     Unit tests for the plugin's game-independent logic (catalogue, pricing states, strategy,
-    corruption model). Build/run with the HUD's ExileCore, like the plugin itself:
-      dotnet test tests/BetterEssenceCorruptionHelper.Tests -p:CI_LIBS_PATH=<ExileApi-Compiled folder>
+    corruption model). Built against the HUD's ExileCore, like the plugin itself, and run with
+    dotnet run (the command is in the README): it is an xunit v3 executable, and .NET 10's
+    dotnet test no longer runs it through VSTest.
   -->
   <PropertyGroup>
     <TargetFramework>net10.0-windows</TargetFramework>
